@@ -13,6 +13,7 @@ set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
 add_subdirectory("external/glfw")
 add_subdirectory("external/glm")
 add_subdirectory("external/glad")
+add_subdirectory("external/stb")
 
 file(GLOB_RECURSE SRC_FILES "source/*.cpp" "source/*.hpp")
 
@@ -21,7 +22,7 @@ function(example NAME SOURCE)
 	target_sources(${NAME} PRIVATE ${SOURCE})
 	target_include_directories(${NAME} PRIVATE "include")
 	target_compile_definitions(${NAME} PRIVATE GLFW_INCLUDE_NONE)
-	target_link_libraries(${NAME} PRIVATE glfw glm::glm glad)
+	target_link_libraries(${NAME} PRIVATE glfw glm::glm glad stb)
 endfunction()
 
 example(Triangle "source/triangle.cpp")
