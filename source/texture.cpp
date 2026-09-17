@@ -257,7 +257,7 @@ int main()
 	GLuint64 textureHandle = glGetTextureHandleARB(debugTexture);
 	glMakeTextureHandleResidentARB(textureHandle);
 
-	FrameData frameData;
+	FrameData frameData{};
 	frameData.textureHandle = textureHandle;
 
 	while (!glfwWindowShouldClose(window))
