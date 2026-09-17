@@ -63,7 +63,6 @@ const char* fragmentShaderSource = R"(
 	};
 
 	void main() {
-		// uvec2 handleVec = unpackUint2x32(frameData.textureHandle);
 		sampler2D bindlessTex = sampler2D(frameData.textureHandle);
 
 		FragColor = texture(bindlessTex, vTexCoord);
@@ -84,8 +83,7 @@ static GLuint CompileShader(GLenum type, const char* source)
 		glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &logLen);
 		std::string log(logLen, '\0');
 		glGetShaderInfoLog(shader, logLen, nullptr, log.data());
-		std::cerr << "Shader compile error (" << (type == GL_VERTEX_SHADER ? "vertex" : "fragment")
-			<< "):\n" << log << std::endl;
+		std::cerr << "Shader compile error (" << (type == GL_VERTEX_SHADER ? "vertex" : "fragment") << "):\n" << log << std::endl;
 	}
 	return shader;
 }
