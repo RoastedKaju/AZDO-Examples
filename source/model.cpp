@@ -26,25 +26,37 @@ struct Vertex
 {
 	glm::vec3 position;
 	glm::vec2 texCoord;
+	glm::vec3 normal;
 };
 
 struct FrameData
 {
-	glm::mat4 MVP;
-	GLuint64 diffuseHandle;
+	glm::mat4 model;
+	glm::mat4 view;
+	glm::mat4 proj;
+	GLuint64 baseColorHandle;
+	GLuint64 normalHandle;
+	GLuint64 metallicRoughnessHandle;
+	GLuint64 occlusionHandle;
+	GLuint64 emissiveHandle;
 };
 
 struct Primitive
 {
 	GLuint VAO = 0, VBO = 0, EBO = 0;
 	GLsizei indexCount = 0;
-	GLuint textureId = 0;
-	GLuint64 textureHandle = 0;
+	GLuint64 baseColorHandle = 0;
+	GLuint64 normalHandle = 0;
+	GLuint64 metallicRoughnessHandle = 0;
+	GLuint64 occlusionHandle = 0;
+	GLuint64 emissiveHandle = 0;
 };
 
 struct Model
 {
 	std::vector<Primitive> primitives;
+	std::vector<GLuint> textureIds;
+	std::vector<GLuint64> textureHandles;
 };
 
 const char* vertexShaderSource = R"(
@@ -53,12 +65,21 @@ const char* vertexShaderSource = R"(
 
 layout (location = 0) in vec3 aPos;
 layout (location = 1) in vec2 aTexCoord;
+layout (location = 2) in vec3 aNormal;
 
 layout (location = 0) out vec2 vTexCoord;
+layout (location = 1) out vec3 vFragPos;
+layout (location = 2) out vec3 vNormal;
 
 struct FrameData {
-	mat4 MVP;
-	uvec2 textureHandle;
+	mat4 model;
+	mat4 view;
+	mat4 proj;
+	uvec2 baseColorHandle;
+	uvec2 normalHandle;
+	uvec2 metallicRoughnessHandle;
+	uvec2 occlusionHandle;
+	uvec2 emissiveHandle;
 };
 
 layout (std430, binding = 0) buffer SceneData {
@@ -67,7 +88,15 @@ layout (std430, binding = 0) buffer SceneData {
 
 void main() {
 	vTexCoord = aTexCoord;
-	gl_Position = frameData.MVP * vec4(aPos, 1.0);
+	
+	vec4 worldPos = frameData.model * vec4(aPos, 1.0);
+	vFragPos = worldPos.xyz;
+	
+	mat3 normalMatrix = transpose(inverse(mat3(frameData.model)));
+	vNormal = normalize(normalMatrix * aNormal);
+	
+	// Final clip space position
+	gl_Position = frameData.proj * frameData.view * worldPos;
 }
 )";
 
@@ -77,11 +106,20 @@ const char* fragmentShaderSource = R"(
 #extension GL_ARB_gpu_shader_int64 : require
 
 layout (location = 0) in vec2 vTexCoord;
+layout (location = 1) in vec3 vFragPos;
+layout (location = 2) in vec3 vNormal;
+
 layout (location = 0) out vec4 FragColor;
 
 struct FrameData {
-	mat4 MVP;
-	uvec2 textureHandle;
+	mat4 model;
+	mat4 view;
+	mat4 proj;
+	uvec2 baseColorHandle;
+	uvec2 normalHandle;
+	uvec2 metallicRoughnessHandle;
+	uvec2 occlusionHandle;
+	uvec2 emissiveHandle;
 };
 
 layout (std430, binding = 0) buffer SceneData {
@@ -89,10 +127,56 @@ layout (std430, binding = 0) buffer SceneData {
 };
 
 void main() {
-	sampler2D bindlessTex = sampler2D(frameData.textureHandle);
-	FragColor = texture(bindlessTex, vTexCoord);
+	// Sample base texture color
+	sampler2D baseTex = sampler2D(frameData.baseColorHandle);
+	vec4 albedo = texture(baseTex, vTexCoord);
+
+	// Light setup (hardcoded directional key light + view pos)
+	vec3 lightDir = normalize(vec3(0.5, 1.0, 0.8));
+	vec3 lightColor = vec3(1.0, 0.95, 0.9);
+	vec3 viewPos = vec3(0.0, 1.0, 3.0);
+	
+	// Lighting constants
+	float ambientStrength = 0.15;
+	float specularStrength = 0.8;
+	float shininess = 64.0;
+
+	// Ambient
+	vec3 ambient = ambientStrength * lightColor;
+
+	// Diffuse
+	vec3 N = normalize(vNormal);
+	float diff = max(dot(N, lightDir), 0.0);
+	vec3 diffuse = diff * lightColor;
+
+	// Specular
+	vec3 viewDir = normalize(viewPos - vFragPos);
+	vec3 halfDir = normalize(lightDir + viewDir);
+	float spec = pow(max(dot(N, halfDir), 0.0), shininess);
+	vec3 specular = specularStrength * spec * lightColor;
+
+	// Final Color Assembly
+	vec3 lightingResult = (ambient + diffuse + specular) * albedo.rgb;
+	
+	FragColor = vec4(lightingResult, albedo.a);
 }
 )";
+
+static GLuint64 ResolveTextureHandle(const tg3_model& model, int32_t textureIndex, const std::vector<GLuint64>& imageHandle)
+{
+	if (textureIndex < 0 || (uint32_t)textureIndex >= model.textures_count)
+	{
+		return 0;
+	}
+
+	int32_t imageIndex = model.textures[textureIndex].source;
+	if (imageIndex < 0 || (size_t)imageIndex >= imageHandle.size())
+	{
+		return 0;
+	}
+
+	return imageHandle[imageIndex];
+}
 
 static GLuint CompileShader(GLenum type, const char* source)
 {
@@ -280,11 +364,13 @@ static Model LoadModel(const std::string& filePath)
 
 			int positionAccessor = -1;
 			int texCoordAccessor = -1;
+			int normalAccessor = -1;
 			for (uint32_t a = 0; a < prim.attributes_count; ++a)
 			{
 				const tg3_str_int_pair& attr = prim.attributes[a];
 				if (tg3_str_equals_cstr(attr.key, "POSITION")) positionAccessor = attr.value;
 				else if (tg3_str_equals_cstr(attr.key, "TEXCOORD_0")) texCoordAccessor = attr.value;
+				else if (tg3_str_equals_cstr(attr.key, "NORMAL")) normalAccessor = attr.value;
 			}
 
 			if (positionAccessor < 0)
@@ -308,6 +394,14 @@ static Model LoadModel(const std::string& filePath)
 				uvData = GetAccessorData(model, texCoordAccessor, uvStride, uvCount);
 			}
 
+			// normal
+			const unsigned char* normData = nullptr;
+			size_t normStride = 0, normCount = 0;
+			if (normalAccessor >= 0)
+			{
+				normData = GetAccessorData(model, normalAccessor, normStride, normCount);
+			}
+
 			std::vector<Vertex> vertices(posCount);
 			for (size_t i = 0; i < posCount; ++i)
 			{
@@ -324,6 +418,17 @@ static Model LoadModel(const std::string& filePath)
 				else
 				{
 					vertices[i].texCoord = glm::vec2(0.0f);
+				}
+
+				if (normData)
+				{
+					glm::vec3 norm;
+					std::memcpy(&norm, normData + i * normStride, sizeof(glm::vec3));
+					vertices[i].normal = norm;
+				}
+				else
+				{
+					vertices[i].normal = glm::vec3(0.0f);
 				}
 			}
 
@@ -386,25 +491,28 @@ static Model LoadModel(const std::string& filePath)
 			glVertexArrayAttribFormat(gpuPrim.VAO, 1, 2, GL_FLOAT, GL_FALSE, offsetof(Vertex, texCoord));
 			glVertexArrayAttribBinding(gpuPrim.VAO, 1, 0);
 
+			glEnableVertexArrayAttrib(gpuPrim.VAO, 2);
+			glVertexArrayAttribFormat(gpuPrim.VAO, 2, 3, GL_FLOAT, GL_FALSE, offsetof(Vertex, normal));
+			glVertexArrayAttribBinding(gpuPrim.VAO, 2, 0);
+
 			// Resolve base color texture through material -> texture -> image.
-			if (prim.material >= 0)
+			if (prim.material >= 0 && (uint32_t)prim.material < model.materials_count)
 			{
 				const tg3_material& material = model.materials[prim.material];
-				int32_t texIndex = material.pbr_metallic_roughness.base_color_texture.index;
-				if (texIndex >= 0 && (uint32_t)texIndex < model.textures_count)
-				{
-					int32_t imageIndex = model.textures[texIndex].source;
-					if (imageIndex >= 0 && (size_t)imageIndex < imageHandles.size())
-					{
-						gpuPrim.textureId = imageTexIds[imageIndex];
-						gpuPrim.textureHandle = imageHandles[imageIndex];
-					}
-				}
+
+				gpuPrim.baseColorHandle = ResolveTextureHandle(model, material.pbr_metallic_roughness.base_color_texture.index, imageHandles);
+				gpuPrim.metallicRoughnessHandle = ResolveTextureHandle(model, material.pbr_metallic_roughness.metallic_roughness_texture.index, imageHandles);
+				gpuPrim.normalHandle = ResolveTextureHandle(model, material.normal_texture.index, imageHandles);
+				gpuPrim.occlusionHandle = ResolveTextureHandle(model, material.occlusion_texture.index, imageHandles);
+				gpuPrim.emissiveHandle = ResolveTextureHandle(model, material.emissive_texture.index, imageHandles);
 			}
 			result.primitives.push_back(gpuPrim);
 		}
 	}
 	tg3_model_free(&model);
+
+	result.textureIds = std::move(imageTexIds);
+	result.textureHandles = std::move(imageHandles);
 
 	return result;
 }
@@ -462,7 +570,6 @@ int main()
 		glm::mat4 model = glm::rotate(glm::mat4(1.0f), time * glm::radians(50.0f), glm::vec3(0.0f, 1.0f, 0.0f));
 		glm::mat4 view = glm::lookAt(glm::vec3(0.0f, 1.0f, 3.0f), glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
 		glm::mat4 projection = glm::perspective(glm::radians(60.0f), 800.0f / 600.0f, 0.1f, 100.0f);
-		glm::mat4 MVP = projection * view * model;
 
 		// Clear color
 		glClearColor(0.1f, 0.12f, 0.1f, 1.0f);
@@ -472,7 +579,17 @@ int main()
 		glUseProgram(shaderProgram);
 		for (const Primitive& prim : ibex.primitives)
 		{
-			FrameData frameData{ .MVP = MVP, .diffuseHandle = prim.textureHandle };
+			FrameData frameData
+			{
+				.model = model,
+				.view = view,
+				.proj = projection,
+				.baseColorHandle = prim.baseColorHandle,
+				.normalHandle = prim.normalHandle,
+				.metallicRoughnessHandle = prim.metallicRoughnessHandle,
+				.occlusionHandle = prim.occlusionHandle,
+				.emissiveHandle = prim.emissiveHandle
+			};
 			glNamedBufferSubData(SSBO, 0, sizeof(FrameData), &frameData);
 
 			glBindVertexArray(prim.VAO);
@@ -488,15 +605,17 @@ int main()
 		glDeleteVertexArrays(1, &prim.VAO);
 		glDeleteBuffers(1, &prim.VBO);
 		glDeleteBuffers(1, &prim.EBO);
-		if (prim.textureHandle)
-		{
-			glMakeTextureHandleNonResidentARB(prim.textureHandle);
-		}
-		if (prim.textureId)
-		{
-			glDeleteTextures(1, &prim.textureId);
-		}
 	}
+	// clean up every texture
+	for (GLuint64 handle : ibex.textureHandles)
+	{
+		if (handle) glMakeTextureHandleNonResidentARB(handle);
+	}
+	for (GLuint texId : ibex.textureIds)
+	{
+		if (texId) glDeleteTextures(1, &texId);
+	}
+
 	glDeleteBuffers(1, &SSBO);
 	glDeleteProgram(shaderProgram);
 	glfwDestroyWindow(window);
