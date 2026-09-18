@@ -3,6 +3,9 @@
 #include <glm/glm.hpp>
 #include <iostream>
 
+static int sWidth = 800;
+static int sHeight = 600;
+
 void GLAPIENTRY glDebugOutput(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar* message, const void* userParam)
 {
 	// Ignore non-significant error codes
@@ -12,6 +15,8 @@ void GLAPIENTRY glDebugOutput(GLenum source, GLenum type, GLuint id, GLenum seve
 
 static void FrameBufferSizeCallback(GLFWwindow* window, int width, int height)
 {
+	sWidth = width;
+	sHeight = height;
 	glViewport(0, 0, width, height);
 }
 
@@ -73,7 +78,7 @@ int main()
 	glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 	glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GLFW_TRUE);
 
-	GLFWwindow* window = glfwCreateWindow(800, 600, "Triangle", nullptr, nullptr);
+	GLFWwindow* window = glfwCreateWindow(sWidth, sHeight, "Triangle", nullptr, nullptr);
 	if (!window)
 	{
 		glfwTerminate();

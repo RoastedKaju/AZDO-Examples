@@ -8,6 +8,9 @@
 #include <vector>
 #include <string>
 
+static int sWidth = 800;
+static int sHeight = 600;
+
 void GLAPIENTRY glDebugOutput(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar* message, const void* userParam)
 {
 	// Ignore non-significant error codes
@@ -17,6 +20,8 @@ void GLAPIENTRY glDebugOutput(GLenum source, GLenum type, GLuint id, GLenum seve
 
 static void FrameBufferSizeCallback(GLFWwindow* window, int width, int height)
 {
+	sWidth = width;
+	sHeight = height;
 	glViewport(0, 0, width, height);
 }
 
@@ -144,7 +149,7 @@ int main()
 	glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 	glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GLFW_TRUE);
 
-	GLFWwindow* window = glfwCreateWindow(800, 600, "Textured Quad", nullptr, nullptr);
+	GLFWwindow* window = glfwCreateWindow(sWidth, sHeight, "Textured Quad", nullptr, nullptr);
 	if (!window)
 	{
 		glfwTerminate();
@@ -168,7 +173,7 @@ int main()
 		return EXIT_FAILURE;
 	}
 
-	glViewport(0, 0, 800, 600);
+	glViewport(0, 0, sWidth, sHeight);
 	glEnable(GL_DEBUG_OUTPUT);
 	glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
 	glDebugMessageCallback(glDebugOutput, nullptr);
@@ -268,7 +273,7 @@ int main()
 
 		glm::mat4 model = glm::mat4(1.0f);
 		glm::mat4 view = glm::lookAt(glm::vec3(0.0f, 0.0f, cameraZ), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-		glm::mat4 proj = glm::perspective(glm::radians(45.0f), 800.0f / 600.0f, 0.1f, 100.0f);
+		glm::mat4 proj = glm::perspective(glm::radians(45.0f), (float)sWidth / (float)sHeight, 0.1f, 100.0f);
 
 		glm::mat4 mvp = proj * view * model;
 
