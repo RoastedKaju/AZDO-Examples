@@ -9,6 +9,7 @@
 #include <vector>
 #include <string>
 #include <filesystem>
+#include <array>
 
 void GLAPIENTRY glDebugOutput(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar* message, const void* userParam)
 {
@@ -27,6 +28,7 @@ struct Vertex
 	glm::vec3 position;
 	glm::vec2 texCoord;
 	glm::vec3 normal;
+	glm::vec4 tangent;
 };
 
 struct FrameData
@@ -59,6 +61,63 @@ struct Model
 	std::vector<GLuint64> textureHandles;
 };
 
+struct FallbackTextures
+{
+	GLuint64 baseColorHandle = 0;
+	GLuint64 normalHandle = 0;
+	GLuint64 metallicRoughnessHandle = 0;
+	GLuint64 occlusionHandle = 0;
+	GLuint64 emissiveHandle = 0;
+
+	std::vector<GLuint> textures;
+
+	void Initialize()
+	{
+		const uint8_t white[4] = { 255, 255, 255, 255 }; // Albedo / Occlusion
+		const uint8_t flatNormal[4] = { 128, 128, 255, 255 }; // Tangent Normal (+Z)
+		const uint8_t metallicRoughness[4] = { 0, 255,   0, 255 }; // Roughness = 1.0, Metallic = 0.0
+		const uint8_t black[4] = { 0,   0,   0, 255 }; // Emissive (Off)
+
+		baseColorHandle = Create1x1Handle(white);
+		normalHandle = Create1x1Handle(flatNormal);
+		metallicRoughnessHandle = Create1x1Handle(metallicRoughness);
+		occlusionHandle = Create1x1Handle(white);
+		emissiveHandle = Create1x1Handle(black);
+	}
+
+	void Cleanup()
+	{
+		for (GLuint64 handle : {baseColorHandle, normalHandle, metallicRoughnessHandle, occlusionHandle, emissiveHandle})
+		{
+			if (handle) glMakeTextureHandleNonResidentARB(handle);
+		}
+		for (GLuint tex : textures)
+		{
+			if (tex) glDeleteTextures(1, &tex);
+		}
+	}
+
+private:
+	GLuint64 Create1x1Handle(const uint8_t pixel[4])
+	{
+		GLuint texture = 0;
+		glCreateTextures(GL_TEXTURE_2D, 1, &texture);
+		glTextureStorage2D(texture, 1, GL_RGBA8, 1, 1);
+		glTextureSubImage2D(texture, 0, 0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+
+		glTextureParameteri(texture, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTextureParameteri(texture, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+		GLuint64 handle = glGetTextureHandleARB(texture);
+		if (handle != 0)
+		{
+			glMakeTextureHandleResidentARB(handle);
+			textures.push_back(texture);
+		}
+		return handle;
+	}
+};
+
 const char* vertexShaderSource = R"(
 #version 460 core
 #extension GL_ARB_gpu_shader_int64 : require
@@ -66,10 +125,13 @@ const char* vertexShaderSource = R"(
 layout (location = 0) in vec3 aPos;
 layout (location = 1) in vec2 aTexCoord;
 layout (location = 2) in vec3 aNormal;
+layout (location = 3) in vec4 aTangent;
 
 layout (location = 0) out vec2 vTexCoord;
 layout (location = 1) out vec3 vFragPos;
 layout (location = 2) out vec3 vNormal;
+layout (location = 3) out vec3 vTangent;
+layout (location = 4) out vec3 vBitangent;
 
 struct FrameData {
 	mat4 model;
@@ -93,8 +155,16 @@ void main() {
 	vFragPos = worldPos.xyz;
 	
 	mat3 normalMatrix = transpose(inverse(mat3(frameData.model)));
-	vNormal = normalize(normalMatrix * aNormal);
+
+	vec3 N = normalize(normalMatrix * aNormal);
+	vec3 T = normalize(normalMatrix * aTangent.xyz);
+	T = normalize(T - dot(T, N) * N);
+	vec3 B = cross(N, T) * aTangent.w;
 	
+	vNormal = N;
+	vTangent = T;
+	vBitangent = B;
+
 	// Final clip space position
 	gl_Position = frameData.proj * frameData.view * worldPos;
 }
@@ -108,6 +178,8 @@ const char* fragmentShaderSource = R"(
 layout (location = 0) in vec2 vTexCoord;
 layout (location = 1) in vec3 vFragPos;
 layout (location = 2) in vec3 vNormal;
+layout (location = 3) in vec3 vTangent;
+layout (location = 4) in vec3 vBitangent;
 
 layout (location = 0) out vec4 FragColor;
 
@@ -131,6 +203,16 @@ void main() {
 	sampler2D baseTex = sampler2D(frameData.baseColorHandle);
 	vec4 albedo = texture(baseTex, vTexCoord);
 
+	// Construct TBN matrix
+	mat3 TBN = mat3(normalize(vTangent), normalize(vBitangent), normalize(vNormal));
+
+	sampler2D normalTex = sampler2D(frameData.normalHandle);
+	vec3 tangentNormal = texture(normalTex, vTexCoord).rgb * 2.0 - 1.0;
+	float normalStrength = 3.0;
+	tangentNormal.xy *= normalStrength;
+	tangentNormal = normalize(tangentNormal);
+	vec3 N = normalize(TBN * tangentNormal);
+
 	// Light setup (hardcoded directional key light + view pos)
 	vec3 lightDir = normalize(vec3(0.5, 1.0, 0.8));
 	vec3 lightColor = vec3(1.0, 0.95, 0.9);
@@ -145,7 +227,6 @@ void main() {
 	vec3 ambient = ambientStrength * lightColor;
 
 	// Diffuse
-	vec3 N = normalize(vNormal);
 	float diff = max(dot(N, lightDir), 0.0);
 	vec3 diffuse = diff * lightColor;
 
@@ -193,6 +274,7 @@ static GLuint CompileShader(GLenum type, const char* source)
 		std::string log(logLen, '\0');
 		glGetShaderInfoLog(shader, logLen, nullptr, log.data());
 		std::cerr << "Shader compile error (" << (type == GL_VERTEX_SHADER ? "vertex" : "fragment") << "):\n" << log << std::endl;
+		exit(EXIT_FAILURE);
 	}
 	return shader;
 }
@@ -216,6 +298,7 @@ static GLuint CreateShaderProgram()
 		std::string log(logLen, '\0');
 		glGetProgramInfoLog(program, logLen, nullptr, log.data());
 		std::cerr << "Program link error:\n" << log << std::endl;
+		exit(EXIT_FAILURE);
 	}
 
 	glDeleteShader(vs);
@@ -281,7 +364,7 @@ static const unsigned char* GetAccessorData(const tg3_model& model, int accessor
 	return buffer.data.data + view.byte_offset + accessor.byte_offset;
 }
 
-static Model LoadModel(const std::string& filePath)
+static Model LoadModel(const std::string& filePath, const FallbackTextures& fallbacks)
 {
 	Model result;
 
@@ -365,12 +448,14 @@ static Model LoadModel(const std::string& filePath)
 			int positionAccessor = -1;
 			int texCoordAccessor = -1;
 			int normalAccessor = -1;
+			int tangentAccessor = -1;
 			for (uint32_t a = 0; a < prim.attributes_count; ++a)
 			{
 				const tg3_str_int_pair& attr = prim.attributes[a];
 				if (tg3_str_equals_cstr(attr.key, "POSITION")) positionAccessor = attr.value;
 				else if (tg3_str_equals_cstr(attr.key, "TEXCOORD_0")) texCoordAccessor = attr.value;
 				else if (tg3_str_equals_cstr(attr.key, "NORMAL")) normalAccessor = attr.value;
+				else if (tg3_str_equals_cstr(attr.key, "TANGENT")) tangentAccessor = attr.value;
 			}
 
 			if (positionAccessor < 0)
@@ -402,6 +487,14 @@ static Model LoadModel(const std::string& filePath)
 				normData = GetAccessorData(model, normalAccessor, normStride, normCount);
 			}
 
+			// tangent
+			const unsigned char* tangentData = nullptr;
+			size_t tangentStride = 0, tangentCount = 0;
+			if (tangentAccessor >= 0)
+			{
+				tangentData = GetAccessorData(model, tangentAccessor, tangentStride, tangentCount);
+			}
+
 			std::vector<Vertex> vertices(posCount);
 			for (size_t i = 0; i < posCount; ++i)
 			{
@@ -429,6 +522,17 @@ static Model LoadModel(const std::string& filePath)
 				else
 				{
 					vertices[i].normal = glm::vec3(0.0f);
+				}
+
+				if (tangentData)
+				{
+					glm::vec4 tangent;
+					std::memcpy(&tangent, tangentData + i * tangentStride, sizeof(glm::vec4));
+					vertices[i].tangent = tangent;
+				}
+				else
+				{
+					vertices[i].tangent = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
 				}
 			}
 
@@ -495,6 +599,10 @@ static Model LoadModel(const std::string& filePath)
 			glVertexArrayAttribFormat(gpuPrim.VAO, 2, 3, GL_FLOAT, GL_FALSE, offsetof(Vertex, normal));
 			glVertexArrayAttribBinding(gpuPrim.VAO, 2, 0);
 
+			glEnableVertexArrayAttrib(gpuPrim.VAO, 3);
+			glVertexArrayAttribFormat(gpuPrim.VAO, 3, 4, GL_FLOAT, GL_FALSE, offsetof(Vertex, tangent));
+			glVertexArrayAttribBinding(gpuPrim.VAO, 3, 0);
+
 			// Resolve base color texture through material -> texture -> image.
 			if (prim.material >= 0 && (uint32_t)prim.material < model.materials_count)
 			{
@@ -506,6 +614,14 @@ static Model LoadModel(const std::string& filePath)
 				gpuPrim.occlusionHandle = ResolveTextureHandle(model, material.occlusion_texture.index, imageHandles);
 				gpuPrim.emissiveHandle = ResolveTextureHandle(model, material.emissive_texture.index, imageHandles);
 			}
+
+			// Apply Fallbacks if handles failed to load or were missing
+			if (gpuPrim.baseColorHandle == 0)         gpuPrim.baseColorHandle = fallbacks.baseColorHandle;
+			if (gpuPrim.normalHandle == 0)            gpuPrim.normalHandle = fallbacks.normalHandle;
+			if (gpuPrim.metallicRoughnessHandle == 0) gpuPrim.metallicRoughnessHandle = fallbacks.metallicRoughnessHandle;
+			if (gpuPrim.occlusionHandle == 0)         gpuPrim.occlusionHandle = fallbacks.occlusionHandle;
+			if (gpuPrim.emissiveHandle == 0)          gpuPrim.emissiveHandle = fallbacks.emissiveHandle;
+
 			result.primitives.push_back(gpuPrim);
 		}
 	}
@@ -551,6 +667,9 @@ int main()
 
 	GLuint shaderProgram = CreateShaderProgram();
 
+	FallbackTextures defaultTextures{};
+	defaultTextures.Initialize();
+
 	// SSBO holding per-frame data
 	GLuint SSBO;
 	glCreateBuffers(1, &SSBO);
@@ -558,7 +677,7 @@ int main()
 	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, SSBO);
 
 	// Load Ibex model
-	Model ibex = LoadModel("../../../resources/models/ibex.glb");
+	Model ibex = LoadModel("../../../resources/models/ibex.glb", defaultTextures);
 
 	while (!glfwWindowShouldClose(window))
 	{
@@ -615,6 +734,8 @@ int main()
 	{
 		if (texId) glDeleteTextures(1, &texId);
 	}
+
+	defaultTextures.Cleanup();
 
 	glDeleteBuffers(1, &SSBO);
 	glDeleteProgram(shaderProgram);
