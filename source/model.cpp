@@ -46,6 +46,8 @@ struct FrameData
 	GLuint64 metallicRoughnessHandle;
 	GLuint64 occlusionHandle;
 	GLuint64 emissiveHandle;
+	float roughnessFactor = 1.0f;
+	float metallicFactor = 1.0f;
 };
 
 struct Primitive
@@ -147,6 +149,8 @@ struct FrameData {
 	uvec2 metallicRoughnessHandle;
 	uvec2 occlusionHandle;
 	uvec2 emissiveHandle;
+	float roughnessFactor;
+	float metallicFactor;
 };
 
 layout (std430, binding = 0) buffer SceneData {
@@ -197,54 +201,113 @@ struct FrameData {
 	uvec2 metallicRoughnessHandle;
 	uvec2 occlusionHandle;
 	uvec2 emissiveHandle;
+	float roughnessFactor;
+	float metallicFactor;
 };
 
 layout (std430, binding = 0) buffer SceneData {
 	FrameData frameData;
 };
 
+const float PI = 3.14159265359;
+
+// Cook-Torrance PBR Functions
+float DistributionGGX(vec3 N, vec3 H, float roughness) {
+	float a = roughness * roughness;
+	float a2 = a * a;
+	float NdotH = max(dot(N, H), 0.0);
+	float NdotH2 = NdotH * NdotH;
+
+	float num = a2;
+	float denom = (NdotH2 * (a2 - 1.0) + 1.0);
+	denom = PI * denom * denom;
+
+	return num / max(denom, 0.0001);
+}
+
+float GeometrySchlickGGX(float NdotV, float roughness) {
+	float r = (roughness + 1.0);
+	float k = (r * r) / 8.0;
+
+	float num = NdotV;
+	float denom = NdotV * (1.0 - k) + k;
+
+	return num / denom;
+}
+
+float GeometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
+	float NdotV = max(dot(N, V), 0.0);
+	float NdotL = max(dot(N, L), 0.0);
+	float ggx2 = GeometrySchlickGGX(NdotV, roughness);
+	float ggx1 = GeometrySchlickGGX(NdotL, roughness);
+
+	return ggx1 * ggx2;
+}
+
+vec3 fresnelSchlick(float cosTheta, vec3 F0) {
+	return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
 void main() {
-	// Sample base texture color
+	// Sample albedo & convert to linear space
 	sampler2D baseTex = sampler2D(frameData.baseColorHandle);
-	vec4 albedo = texture(baseTex, vTexCoord);
+	vec4 albedoSample = texture(baseTex, vTexCoord);
+	vec3 albedo = pow(albedoSample.rgb, vec3(2.2));
 
-	// Construct TBN matrix
+	// Sample packed metallic-roughness map
+	sampler2D mrTex = sampler2D(frameData.metallicRoughnessHandle);
+	vec4 mrSample = texture(mrTex, vTexCoord);
+
+	float roughness = clamp(mrSample.g * frameData.roughnessFactor, 0.05, 1.0);
+	float metallic  = clamp(mrSample.b * frameData.metallicFactor, 0.0, 1.0);
+
+	// Normal mapping
 	mat3 TBN = mat3(normalize(vTangent), normalize(vBitangent), normalize(vNormal));
-
 	sampler2D normalTex = sampler2D(frameData.normalHandle);
 	vec3 tangentNormal = texture(normalTex, vTexCoord).rgb * 2.0 - 1.0;
-	float normalStrength = 3.0;
+
+	float normalStrength = 1.5;
 	tangentNormal.xy *= normalStrength;
 	tangentNormal = normalize(tangentNormal);
+	
 	vec3 N = normalize(TBN * tangentNormal);
 
-	// Light setup (hardcoded directional key light + view pos)
-	vec3 lightDir = normalize(vec3(0.5, 1.0, 0.8));
-	vec3 lightColor = vec3(1.0, 0.95, 0.9);
-	vec3 viewPos = vec3(0.0, 1.0, 3.0);
+	// View & Light setup
+	vec3 viewPos = vec3(0.0, 1.0, 3.0); 
+	vec3 V = normalize(viewPos - vFragPos);
+	vec3 L = normalize(vec3(0.5, 1.0, 0.8));
+	vec3 H = normalize(V + L);
+	vec3 lightColor = vec3(2.5); // Directional Light Intensity
+
+	// Fresnel Reflectivity at Normal Incidence
+	vec3 F0 = vec3(0.04); 
+	F0 = mix(F0, albedo, metallic);
+
+	// Cook-Torrance BRDF Computation
+	float NDF = DistributionGGX(N, H, roughness);
+	float G   = GeometrySmith(N, V, L, roughness);
+	vec3 F    = fresnelSchlick(max(dot(H, V), 0.0), F0);
+
+	vec3 numerator    = NDF * G * F; 
+	float denominator = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001;
+	vec3 specular     = numerator / denominator;
 	
-	// Lighting constants
-	float ambientStrength = 0.15;
-	float specularStrength = 0.8;
-	float shininess = 64.0;
+	vec3 kS = F;
+	vec3 kD = (vec3(1.0) - kS) * (1.0 - metallic);	
 
-	// Ambient
-	vec3 ambient = ambientStrength * lightColor;
+	float NdotL = max(dot(N, L), 0.0);
+	vec3 Lo = (kD * albedo / PI + specular) * lightColor * NdotL;
 
-	// Diffuse
-	float diff = max(dot(N, lightDir), 0.0);
-	vec3 diffuse = diff * lightColor;
+	// Ambient Lighting
+	vec3 ambient = vec3(0.03) * albedo;
+	vec3 color = ambient + Lo;
 
-	// Specular
-	vec3 viewDir = normalize(viewPos - vFragPos);
-	vec3 halfDir = normalize(lightDir + viewDir);
-	float spec = pow(max(dot(N, halfDir), 0.0), shininess);
-	vec3 specular = specularStrength * spec * lightColor;
+	// Reinhard tone mapping & Gamma correction
+	// This later should be moved to post processing pass
+	color = color / (color + vec3(1.0));
+	color = pow(color, vec3(1.0 / 2.6));
 
-	// Final Color Assembly
-	vec3 lightingResult = (ambient + diffuse + specular) * albedo.rgb;
-	
-	FragColor = vec4(lightingResult, albedo.a);
+	FragColor = vec4(color, albedoSample.a);
 }
 )";
 
@@ -671,6 +734,11 @@ int main()
 
 	// enable depth testing
 	glEnable(GL_DEPTH_TEST);
+	glDepthFunc(GL_LESS);
+	// Culling
+	glEnable(GL_CULL_FACE);
+	glCullFace(GL_BACK);
+	glFrontFace(GL_CCW);
 
 	GLuint shaderProgram = CreateShaderProgram();
 
@@ -714,7 +782,9 @@ int main()
 				.normalHandle = prim.normalHandle,
 				.metallicRoughnessHandle = prim.metallicRoughnessHandle,
 				.occlusionHandle = prim.occlusionHandle,
-				.emissiveHandle = prim.emissiveHandle
+				.emissiveHandle = prim.emissiveHandle,
+				.roughnessFactor = 1.0f,
+				.metallicFactor = 1.0f
 			};
 			glNamedBufferSubData(SSBO, 0, sizeof(FrameData), &frameData);
 
