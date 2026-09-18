@@ -8,6 +8,7 @@
 #include <fstream>
 #include <vector>
 #include <string>
+#include <format>
 
 static int sWidth = 800;
 static int sHeight = 600;
@@ -102,6 +103,213 @@ void main() {
 }
 )";
 
+const char* textVertexShader = R"(
+#version 460 core
+#extension GL_ARB_bindless_texture : require
+
+layout (location = 0) in vec2 aPos;
+layout (location = 1) in vec2 aUV;
+
+layout (location = 0) out vec2 vUV;
+
+layout (std430, binding = 1) readonly buffer PerDrawData {
+	mat4 uProj;
+	vec4 uColor;
+	uvec2 uTexHandle;
+};
+
+void main() {
+	vUV = aUV;
+	gl_Position = uProj * vec4(aPos, 0.0, 1.0);
+}
+)";
+
+const char* textFragShader = R"(
+#version 460 core
+#extension GL_ARB_bindless_texture : require
+
+layout (location = 0) in vec2 vUV;
+layout (location = 0) out vec4 FragColor;
+
+layout (std430, binding = 1) readonly buffer PerDrawData {
+	mat4 uProj;
+	vec4 uColor;
+	uvec2 uTexHandle;
+};
+
+void main() {
+	sampler2D baseTex = sampler2D(uTexHandle);
+	float alpha = texture(baseTex, vUV).r;
+	FragColor = vec4(uColor.rgb, alpha);
+}
+)";
+
+// Text rendering types
+struct TextVertex
+{
+	glm::vec2 position;
+	glm::vec2 uv;
+};
+
+struct PerDrawTextData
+{
+	glm::mat4 proj;
+	glm::vec4 color;
+	GLuint64 textureHandle;
+};
+
+struct TextRenderer
+{
+	GLuint texture = 0;
+	GLuint64 textureHandle = 0;
+	GLuint program = 0;
+	GLuint VAO = 0, VBO = 0, SSBO = 0;
+	stbtt_packedchar charData[96]{}; // ASCII 32..127
+	int atlasWidth = 512;
+	int atlasHeight = 512;
+	float fontSize = 32.0f;
+	size_t maxQuads = 4069; // capacity of dynamic VBO, in quads (6 verts each)
+
+	bool Init(const char* fontPath)
+	{
+		std::ifstream file(fontPath, std::ios::binary | std::ios::ate);
+		if (!file)
+		{
+			std::cerr << "Failed to open font file: " << fontPath << std::endl;
+			return false;
+		}
+
+		std::streamsize size = file.tellg();
+		file.seekg(0, std::ios::beg);
+		std::vector<unsigned char> ttfBuffer((size_t)size);
+		if (!file.read(reinterpret_cast<char*>(ttfBuffer.data()), size))
+		{
+			std::cerr << "Failed to read font: " << fontPath << std::endl;
+			return false;
+		}
+
+		// bake atlas
+		std::vector<unsigned char> bitmap((size_t)atlasWidth * atlasHeight);
+		stbtt_pack_context packCtx;
+		if (!stbtt_PackBegin(&packCtx, bitmap.data(), atlasWidth, atlasHeight, 0, 1, nullptr))
+		{
+			std::cerr << "STB TTF pack begin failed.\n";
+			return false;
+		}
+		stbtt_PackSetOversampling(&packCtx, 2, 2);
+		stbtt_PackFontRange(&packCtx, ttfBuffer.data(), 0, fontSize, 32, 96, charData);
+		stbtt_PackEnd(&packCtx);
+
+		// Upload atlas as single channel texture
+		glCreateTextures(GL_TEXTURE_2D, 1, &texture);
+		glTextureStorage2D(texture, 1, GL_R8, atlasWidth, atlasHeight);
+		glTextureSubImage2D(texture, 0, 0, 0, atlasWidth, atlasHeight, GL_RED, GL_UNSIGNED_BYTE, bitmap.data());
+		glTextureParameteri(texture, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTextureParameteri(texture, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTextureParameteri(texture, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTextureParameteri(texture, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+		textureHandle = glGetTextureHandleARB(texture);
+		glMakeTextureHandleResidentARB(textureHandle);
+
+		// Shader
+		program = CreateShaderProgram(textVertexShader, textFragShader);
+
+		glCreateBuffers(1, &VBO);
+		glNamedBufferStorage(VBO, maxQuads * 6 * sizeof(TextVertex), nullptr, GL_DYNAMIC_STORAGE_BIT);
+
+		glCreateBuffers(1, &SSBO);
+		glNamedBufferStorage(SSBO, sizeof(PerDrawTextData), nullptr, GL_DYNAMIC_STORAGE_BIT);
+		glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, SSBO);
+
+		glCreateVertexArrays(1, &VAO);
+		glEnableVertexArrayAttrib(VAO, 0);
+		glVertexArrayAttribFormat(VAO, 0, 2, GL_FLOAT, GL_FALSE, offsetof(TextVertex, position));
+		glVertexArrayAttribBinding(VAO, 0, 0);
+
+		glEnableVertexArrayAttrib(VAO, 1);
+		glVertexArrayAttribFormat(VAO, 1, 2, GL_FLOAT, GL_FALSE, offsetof(TextVertex, uv));
+		glVertexArrayAttribBinding(VAO, 1, 0);
+
+		glVertexArrayVertexBuffer(VAO, 0, VBO, 0, sizeof(TextVertex));
+
+		return true;
+	}
+
+	void Destroy()
+	{
+		glMakeTextureHandleNonResidentARB(textureHandle);
+		glDeleteProgram(program);
+		glDeleteVertexArrays(1, &VAO);
+		glDeleteBuffers(1, &VBO);
+		glDeleteBuffers(1, &SSBO);
+		glDeleteTextures(1, &texture);
+	}
+
+	// Builds screen space quads for a string
+	std::vector<TextVertex> BuildTextQuad(const std::string& text, float x, float y)
+	{
+		std::vector<TextVertex> verts;
+		verts.reserve(text.size() * 6);
+
+		for (char c : text)
+		{
+			if (c < 32 || c >= 128) continue;
+
+			stbtt_aligned_quad quad;
+			stbtt_GetPackedQuad(charData, atlasWidth, atlasHeight, c - 32, &x, &y, &quad, 1);
+
+			verts.push_back({ {quad.x0, quad.y0}, {quad.s0, quad.t0} });
+			verts.push_back({ {quad.x1, quad.y0}, {quad.s1, quad.t0} });
+			verts.push_back({ {quad.x1, quad.y1}, {quad.s1, quad.t1} });
+
+			verts.push_back({ {quad.x0, quad.y0}, {quad.s0, quad.t0} });
+			verts.push_back({ {quad.x1, quad.y1}, {quad.s1, quad.t1} });
+			verts.push_back({ {quad.x0, quad.y1}, {quad.s0, quad.t1} });
+		}
+		return verts;
+	}
+
+	void RenderText(const std::string& text, float x, float y, const glm::vec3& color, int screenWidth, int screenHeight)
+	{
+		std::vector<TextVertex> verts = BuildTextQuad(text, x, y);
+		if (verts.empty()) return;
+
+		size_t vertCount = verts.size();
+		size_t maxVerts = maxQuads * 6;
+		if (vertCount > maxVerts)
+		{
+			std::cerr << "Text too long for VBO capacity, turncating.\n";
+			vertCount = maxVerts;
+		}
+
+		// VBO is marked dynamic, this is needed as the contents change after building quads, we need to update on GPU as well
+		glNamedBufferSubData(VBO, 0, vertCount * sizeof(TextVertex), verts.data());
+
+		PerDrawTextData perDrawData{};
+		perDrawData.proj = glm::ortho(0.0f, (float)screenWidth, (float)screenHeight, 0.0f, -1.0f, 1.0f);
+		perDrawData.color = glm::vec4(color, 1.0f);
+		perDrawData.textureHandle = textureHandle;
+
+		glNamedBufferSubData(SSBO, 0, sizeof(PerDrawTextData), &perDrawData);
+
+		glUseProgram(program);
+
+		glEnable(GL_BLEND);
+		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+		glDisable(GL_DEPTH_TEST);
+		glDisable(GL_CULL_FACE);
+
+		glBindVertexArray(VAO);
+		glDrawArrays(GL_TRIANGLES, 0, (GLsizei)vertCount);
+
+		// Restore state
+		glEnable(GL_CULL_FACE);
+		glEnable(GL_DEPTH_TEST);
+		glDisable(GL_BLEND);
+	}
+};
+
 int main()
 {
 	if (!glfwInit())
@@ -123,6 +331,7 @@ int main()
 	}
 
 	glfwMakeContextCurrent(window);
+	glfwSwapInterval(1);
 	glfwSetFramebufferSizeCallback(window, &FrameBufferSizeCallback);
 
 	int version = gladLoadGL(glfwGetProcAddress);
@@ -130,6 +339,17 @@ int main()
 	{
 		glfwDestroyWindow(window);
 		glfwTerminate();
+		return EXIT_FAILURE;
+	}
+	// Check extensions
+	if (!GLAD_GL_ARB_bindless_texture)
+	{
+		std::cerr << "GL_ARB_bindless_texture not supported.\n";
+		return EXIT_FAILURE;
+	}
+	if (!GLAD_GL_ARB_gpu_shader_int64)
+	{
+		std::cerr << "GL_ARB_gpu_shader_int64 not supported.\n";
 		return EXIT_FAILURE;
 	}
 
@@ -169,11 +389,11 @@ int main()
 	};
 
 	const unsigned int indices[] = {
-		// Base (Square at Y = -0.5, CCW viewed from underneath)
+		// Base
 		1, 4, 3,
 		3, 2, 1,
 
-		// Side Faces (All CCW when viewed from outside the pyramid)
+		// Side Faces
 		0, 1, 2,  // Front Face
 		0, 2, 3,  // Right Face
 		0, 3, 4,  // Back Face
@@ -210,13 +430,33 @@ int main()
 	// Shader
 	GLuint unlit = CreateShaderProgram(unlitVertex, unlitFrag);
 
+	// Text renderer
+	TextRenderer textRenderer;
+	bool validText = textRenderer.Init("../../../resources/fonts/SpaceGrotesk-Regular.ttf");
+	if (!validText)
+	{
+		std::cerr << "Text rendering disabled (font failed to load).\n";
+	}
+
+	double fpsTimer = glfwGetTime();
+	int frameCount = 0;
+	int fps = 0;
+
 	while (!glfwWindowShouldClose(window))
 	{
 		glfwPollEvents();
 
-		float time = (float)glfwGetTime();
+		double time = glfwGetTime();
+		// FPS calculation
+		frameCount++;
+		if (time - fpsTimer >= 1.0)
+		{
+			fps = frameCount / (int)(time - fpsTimer);
+			frameCount = 0;
+			fpsTimer = time;
+		}
 
-		glm::mat4 model = glm::rotate(glm::mat4(1.0f), time * glm::radians(50.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+		glm::mat4 model = glm::rotate(glm::mat4(1.0f), (float)time * glm::radians(50.0f), glm::vec3(0.0f, 1.0f, 0.0f));
 		glm::mat4 view = glm::lookAt(glm::vec3(0.0f, 0.0f, 3.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
 		glm::mat4 proj = glm::perspective(glm::radians(45.0f), (float)sWidth / (float)sHeight, 0.1f, 100.0f);
 		glm::mat4 MVP = proj * view * model;
@@ -232,7 +472,20 @@ int main()
 		glBindVertexArray(VAO);
 		glDrawElements(GL_TRIANGLES, 18, GL_UNSIGNED_INT, nullptr);
 
+		// Text layer
+		if (validText)
+		{
+			std::string fpsText = std::format("FPS: {}", fps);
+			textRenderer.RenderText(fpsText, 10.0f, 30.0f, glm::vec3(1.0f, 1.0f, 1.0f), sWidth, sHeight);
+			textRenderer.RenderText("Backend: OpenGL 4.6 AZDO", 10.0f, 60.0f, glm::vec3(1.0f, 0.8f, 0.2f), sWidth, sHeight);
+		}
+
 		glfwSwapBuffers(window);
+	}
+
+	if (validText)
+	{
+		textRenderer.Destroy();
 	}
 
 	glDeleteProgram(unlit);
