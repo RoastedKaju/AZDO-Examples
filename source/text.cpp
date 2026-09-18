@@ -109,17 +109,19 @@ const char* textVertexShader = R"(
 
 layout (location = 0) in vec2 aPos;
 layout (location = 1) in vec2 aUV;
+layout (location = 2) in vec4 aColor;
 
 layout (location = 0) out vec2 vUV;
+layout (location = 1) out vec4 vColor;
 
 layout (std430, binding = 1) readonly buffer PerDrawData {
 	mat4 uProj;
-	vec4 uColor;
 	uvec2 uTexHandle;
 };
 
 void main() {
 	vUV = aUV;
+	vColor = aColor;
 	gl_Position = uProj * vec4(aPos, 0.0, 1.0);
 }
 )";
@@ -129,18 +131,18 @@ const char* textFragShader = R"(
 #extension GL_ARB_bindless_texture : require
 
 layout (location = 0) in vec2 vUV;
+layout (location = 1) in vec4 vColor;
 layout (location = 0) out vec4 FragColor;
 
 layout (std430, binding = 1) readonly buffer PerDrawData {
 	mat4 uProj;
-	vec4 uColor;
 	uvec2 uTexHandle;
 };
 
 void main() {
 	sampler2D baseTex = sampler2D(uTexHandle);
 	float alpha = texture(baseTex, vUV).r;
-	FragColor = vec4(uColor.rgb, alpha);
+	FragColor = vec4(vColor.rgb, alpha * vColor.a);
 }
 )";
 
@@ -149,12 +151,12 @@ struct TextVertex
 {
 	glm::vec2 position;
 	glm::vec2 uv;
+	glm::vec4 color;
 };
 
 struct PerDrawTextData
 {
 	glm::mat4 proj;
-	glm::vec4 color;
 	GLuint64 textureHandle;
 };
 
@@ -169,6 +171,10 @@ struct TextRenderer
 	int atlasHeight = 512;
 	float fontSize = 32.0f;
 	size_t maxQuads = 4069; // capacity of dynamic VBO, in quads (6 verts each)
+
+	// Per-frame accumulator, cleared not reallocated in begin frame function
+	std::vector<TextVertex> frameVerts;
+	glm::mat4 frameProj{};
 
 	bool Init(const char* fontPath)
 	{
@@ -231,6 +237,10 @@ struct TextRenderer
 		glVertexArrayAttribFormat(VAO, 1, 2, GL_FLOAT, GL_FALSE, offsetof(TextVertex, uv));
 		glVertexArrayAttribBinding(VAO, 1, 0);
 
+		glEnableVertexArrayAttrib(VAO, 2);
+		glVertexArrayAttribFormat(VAO, 2, 4, GL_FLOAT, GL_FALSE, offsetof(TextVertex, color));
+		glVertexArrayAttribBinding(VAO, 2, 0);
+
 		glVertexArrayVertexBuffer(VAO, 0, VBO, 0, sizeof(TextVertex));
 
 		return true;
@@ -246,11 +256,15 @@ struct TextRenderer
 		glDeleteTextures(1, &texture);
 	}
 
-	// Builds screen space quads for a string
-	std::vector<TextVertex> BuildTextQuad(const std::string& text, float x, float y)
+	void BeginFrame(int screenWidth, int screenHeight)
 	{
-		std::vector<TextVertex> verts;
-		verts.reserve(text.size() * 6);
+		frameVerts.clear();
+		frameProj = glm::ortho(0.0f, (float)screenWidth, (float)screenHeight, 0.0f, -1.0f, 1.0f);
+	}
+
+	void RenderText(const std::string& text, float x, float y, const glm::vec3& color)
+	{
+		glm::vec4 col(color, 1.0f);
 
 		for (char c : text)
 		{
@@ -259,42 +273,40 @@ struct TextRenderer
 			stbtt_aligned_quad quad;
 			stbtt_GetPackedQuad(charData, atlasWidth, atlasHeight, c - 32, &x, &y, &quad, 1);
 
-			verts.push_back({ {quad.x0, quad.y0}, {quad.s0, quad.t0} });
-			verts.push_back({ {quad.x1, quad.y0}, {quad.s1, quad.t0} });
-			verts.push_back({ {quad.x1, quad.y1}, {quad.s1, quad.t1} });
+			frameVerts.push_back({ {quad.x0, quad.y0}, {quad.s0, quad.t0}, col });
+			frameVerts.push_back({ {quad.x1, quad.y0}, {quad.s1, quad.t0}, col });
+			frameVerts.push_back({ {quad.x1, quad.y1}, {quad.s1, quad.t1}, col });
 
-			verts.push_back({ {quad.x0, quad.y0}, {quad.s0, quad.t0} });
-			verts.push_back({ {quad.x1, quad.y1}, {quad.s1, quad.t1} });
-			verts.push_back({ {quad.x0, quad.y1}, {quad.s0, quad.t1} });
+			frameVerts.push_back({ {quad.x0, quad.y0}, {quad.s0, quad.t0}, col });
+			frameVerts.push_back({ {quad.x1, quad.y1}, {quad.s1, quad.t1}, col });
+			frameVerts.push_back({ {quad.x0, quad.y1}, {quad.s0, quad.t1}, col });
 		}
-		return verts;
 	}
 
-	void RenderText(const std::string& text, float x, float y, const glm::vec3& color, int screenWidth, int screenHeight)
+	// Update the whole frame's accumulated glyph quads in one call
+	void EndFrame()
 	{
-		std::vector<TextVertex> verts = BuildTextQuad(text, x, y);
-		if (verts.empty()) return;
+		if (frameVerts.empty()) return;
 
-		size_t vertCount = verts.size();
+		size_t vertCount = frameVerts.size();
 		size_t maxVerts = maxQuads * 6;
 		if (vertCount > maxVerts)
 		{
-			std::cerr << "Text too long for VBO capacity, turncating.\n";
+			std::cerr << "Text batch exceeds VBO capacity (" << vertCount << " > " << maxVerts << "), truncating.\n";
 			vertCount = maxVerts;
 		}
 
-		// VBO is marked dynamic, this is needed as the contents change after building quads, we need to update on GPU as well
-		glNamedBufferSubData(VBO, 0, vertCount * sizeof(TextVertex), verts.data());
+		// Update VBO
+		glNamedBufferSubData(VBO, 0, vertCount * sizeof(TextVertex), frameVerts.data());
 
+		// Update SSBO
 		PerDrawTextData perDrawData{};
-		perDrawData.proj = glm::ortho(0.0f, (float)screenWidth, (float)screenHeight, 0.0f, -1.0f, 1.0f);
-		perDrawData.color = glm::vec4(color, 1.0f);
+		perDrawData.proj = frameProj;
 		perDrawData.textureHandle = textureHandle;
+		glNamedBufferSubData(SSBO, 0, sizeof(perDrawData), &perDrawData);
 
-		glNamedBufferSubData(SSBO, 0, sizeof(PerDrawTextData), &perDrawData);
-
+		// Draw
 		glUseProgram(program);
-
 		glEnable(GL_BLEND);
 		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 		glDisable(GL_DEPTH_TEST);
@@ -475,9 +487,13 @@ int main()
 		// Text layer
 		if (validText)
 		{
+			textRenderer.BeginFrame(sWidth, sHeight);
+
 			std::string fpsText = std::format("FPS: {}", fps);
-			textRenderer.RenderText(fpsText, 10.0f, 30.0f, glm::vec3(1.0f, 1.0f, 1.0f), sWidth, sHeight);
-			textRenderer.RenderText("Backend: OpenGL 4.6 AZDO", 10.0f, 60.0f, glm::vec3(1.0f, 0.8f, 0.2f), sWidth, sHeight);
+			textRenderer.RenderText(fpsText, 10.0f, 30.0f, glm::vec3(1.0f, 1.0f, 1.0f));
+			textRenderer.RenderText("Backend: OpenGL 4.6 AZDO", 10.0f, 60.0f, glm::vec3(1.0f, 0.8f, 0.2f));
+
+			textRenderer.EndFrame();
 		}
 
 		glfwSwapBuffers(window);

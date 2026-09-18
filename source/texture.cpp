@@ -124,7 +124,6 @@ static GLuint CreateShaderProgram()
 static bool LoadImage(const char* path, std::vector<char>& outPixels, int& outWidth, int& outHeight)
 {
 	int width = 0, height = 0, sourceChannels = 0;
-	stbi_set_flip_vertically_on_load(true);
 	unsigned char* data = stbi_load(path, &width, &height, &sourceChannels, 4);
 	if (!data)
 	{
@@ -180,7 +179,13 @@ int main()
 	glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
 	glDebugMessageCallback(glDebugOutput, nullptr);
 
+	// Depth Testing
 	glEnable(GL_DEPTH_TEST);
+	glDepthFunc(GL_LESS);
+	// Culling
+	glEnable(GL_CULL_FACE);
+	glCullFace(GL_BACK);
+	glFrontFace(GL_CCW);
 
 	// C++ Mirror Struct matching SSBO layout
 	struct FrameData
@@ -196,10 +201,10 @@ int main()
 	};
 	// Quad geometry
 	Vertex vertices[] = {
-		{ { -1.0f, -1.0f, 0.0f }, { 0.0f, 0.0f } },
-		{ {  1.0f, -1.0f, 0.0f }, { 1.0f, 0.0f } },
-		{ {  1.0f,  1.0f, 0.0f }, { 1.0f, 1.0f } },
-		{ { -1.0f,  1.0f, 0.0f }, { 0.0f, 1.0f } }
+		{ { -1.0f, -1.0f, 0.0f }, { 0.0f, 1.0f } },
+		{ {  1.0f, -1.0f, 0.0f }, { 1.0f, 1.0f } },
+		{ {  1.0f,  1.0f, 0.0f }, { 1.0f, 0.0f } },
+		{ { -1.0f,  1.0f, 0.0f }, { 0.0f, 0.0f } }
 	};
 
 	GLuint indices[] = {
