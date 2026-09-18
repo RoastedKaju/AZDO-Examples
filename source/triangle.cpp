@@ -22,6 +22,8 @@ static void FrameBufferSizeCallback(GLFWwindow* window, int width, int height)
 
 const char* vertexShaderSource = R"(
 	#version 460 core
+	#extension GL_ARB_gpu_shader_int64 : require
+
 	layout (location = 0) in vec3 aPos;
 	layout (location = 1) in vec3 aColor;
 
@@ -95,6 +97,17 @@ int main()
 		std::cerr << "Failed to initialize GLAD.\n";
 		return EXIT_FAILURE;
 	}
+	// Check extensions
+	if (!GLAD_GL_ARB_bindless_texture)
+	{
+		std::cerr << "GL_ARB_bindless_texture not supported.\n";
+		return EXIT_FAILURE;
+	}
+	if (!GLAD_GL_ARB_gpu_shader_int64)
+	{
+		std::cerr << "GL_ARB_gpu_shader_int64 not supported.\n";
+		return EXIT_FAILURE;
+	}
 
 	glViewport(0, 0, 800, 600);
 
@@ -119,7 +132,7 @@ int main()
 	// Create VBO with DSA
 	GLuint VBO;
 	glCreateBuffers(1, &VBO);
-	glNamedBufferStorage(VBO, sizeof(vertices), vertices, GL_DYNAMIC_STORAGE_BIT);
+	glNamedBufferStorage(VBO, sizeof(vertices), vertices, 0);
 
 	// Create VAO
 	GLuint VAO;

@@ -3,7 +3,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
-#include <stb.hpp>
+#include <stb_image.h>
 #include <iostream>
 #include <vector>
 #include <string>
@@ -89,6 +89,7 @@ static GLuint CompileShader(GLenum type, const char* source)
 		std::string log(logLen, '\0');
 		glGetShaderInfoLog(shader, logLen, nullptr, log.data());
 		std::cerr << "Shader compile error (" << (type == GL_VERTEX_SHADER ? "vertex" : "fragment") << "):\n" << log << std::endl;
+		exit(1);
 	}
 	return shader;
 }
@@ -112,6 +113,7 @@ static GLuint CreateShaderProgram()
 		std::string log(logLen, '\0');
 		glGetProgramInfoLog(program, logLen, nullptr, log.data());
 		std::cerr << "Program link error:\n" << log << std::endl;
+		exit(1);
 	}
 
 	glDeleteShader(vs);
@@ -161,15 +163,15 @@ int main()
 	int version = gladLoadGL(glfwGetProcAddress);
 	if (!version) return EXIT_FAILURE;
 
-	// Verify GPU driver supports bindless textures
+	// Check extensions
 	if (!GLAD_GL_ARB_bindless_texture)
 	{
-		std::cerr << "GL_ARB_bindless_texture is NOT supported on this GPU!" << std::endl;
+		std::cerr << "GL_ARB_bindless_texture not supported.\n";
 		return EXIT_FAILURE;
 	}
 	if (!GLAD_GL_ARB_gpu_shader_int64)
 	{
-		std::cerr << "GL_ARB_gpu_shader_int64 is NOT supported!\n";
+		std::cerr << "GL_ARB_gpu_shader_int64 not supported.\n";
 		return EXIT_FAILURE;
 	}
 
