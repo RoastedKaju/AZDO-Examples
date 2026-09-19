@@ -104,6 +104,7 @@ int main()
 		return EXIT_FAILURE;
 	}
 	glfwMakeContextCurrent(window);
+	glfwSwapInterval(1);
 	glfwSetFramebufferSizeCallback(window, &FrameBufferSizeCallback);
 
 	int version = gladLoadGL(glfwGetProcAddress);

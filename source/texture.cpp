@@ -174,6 +174,11 @@ int main()
 		return EXIT_FAILURE;
 	}
 
+	printf("Vendor: %s\n", glGetString(GL_VENDOR));
+	printf("Renderer: %s\n", glGetString(GL_RENDERER));
+	printf("Version: %s\n", glGetString(GL_VERSION));
+	printf("GLSL: %s\n", glGetString(GL_SHADING_LANGUAGE_VERSION));
+
 	glViewport(0, 0, sWidth, sHeight);
 	glEnable(GL_DEBUG_OUTPUT);
 	glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);

@@ -377,7 +377,6 @@ static GLuint CreateShaderProgram()
 static bool LoadImageFromMemory(const unsigned char* data, size_t size, GLuint& outTexId, GLuint64& outHandle)
 {
 	int width, height, channels;
-	//stbi_set_flip_vertically_on_load(true);
 	unsigned char* pixels = stbi_load_from_memory(data, (int)size, &width, &height, &channels, 4);
 	if (!pixels)
 	{
