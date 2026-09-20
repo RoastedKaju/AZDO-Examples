@@ -11,6 +11,9 @@
 static int sWidth = 800;
 static int sHeight = 600;
 
+static bool sDrawWireFrame = true;
+static float sWireFrameColor[3] = { 0.0f, 0.0f, 0.0f };
+
 void GLAPIENTRY glDebugOutput(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar* message, const void* userParam)
 {
 	// Ignore non-significant error codes
@@ -100,7 +103,7 @@ int main()
 	glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 	glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GLFW_TRUE);
 
-	GLFWwindow* window = glfwCreateWindow(sWidth, sHeight, "Cube", nullptr, nullptr);
+	GLFWwindow* window = glfwCreateWindow(sWidth, sHeight, "ImGUI", nullptr, nullptr);
 	if (!window)
 	{
 		glfwTerminate();
@@ -193,6 +196,9 @@ int main()
 
 	IMGUI_CHECKVERSION();
 	ImGui::CreateContext();
+	ImGuiIO& io = ImGui::GetIO();
+	io.ConfigFlags |= ImGuiConfigFlags_DockingEnable; // Enable docking
+	io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
 	ImGui_ImplGlfw_InitForOpenGL(window, true);
 	ImGui_ImplOpenGL3_Init("#version 460");
 
@@ -222,29 +228,47 @@ int main()
 		glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, nullptr);
 
 		// Render wireframe
-		params.wireframeColor = glm::vec4(1.0f, 0.5f, 0.0f, 1.0f);
-		glNamedBufferSubData(SSBO, 0, sizeof(DrawParams), &params);
-		glEnable(GL_POLYGON_OFFSET_LINE);
-		glPolygonOffset(-1.0f, -1.0f);
-		glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
-		glLineWidth(2.0f);
-		glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, nullptr);
-		// Restore default state
-		glDisable(GL_POLYGON_OFFSET_LINE);
-		glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+		if (sDrawWireFrame)
+		{
+			params.wireframeColor = glm::vec4(sWireFrameColor[0], sWireFrameColor[1], sWireFrameColor[2], 1.0f);
+			glNamedBufferSubData(SSBO, 0, sizeof(DrawParams), &params);
+			// 
+			glEnable(GL_POLYGON_OFFSET_LINE);
+			glPolygonOffset(-1.0f, -1.0f);
+			glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+			glLineWidth(2.0f);
+			glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, nullptr);
+			// Restore default state
+			glDisable(GL_POLYGON_OFFSET_LINE);
+			glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+		}
 
 		// ImGUI Layer
 		ImGui_ImplOpenGL3_NewFrame();
 		ImGui_ImplGlfw_NewFrame();
 		ImGui::NewFrame();
 
-		ImGui::Begin("AZDO");
-		ImGui::Text("Hello from ImGui!");
-		ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
+		// Dockspace on entire viewport with centeral node transparent
+		ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode);
+
+		ImGui::Begin("ImGUI Window");
+		ImGui::Checkbox("Show Wireframe", &sDrawWireFrame);
+		ImGui::Text("Wireframe Color");
+		ImGui::ColorEdit3("##WireframeColor", sWireFrameColor);
 		ImGui::End();
 
 		ImGui::Render();
 		ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+
+		ImGuiIO& io = ImGui::GetIO();
+		if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
+		{
+			// This is needed because when you drag the windows out of ImGUI dynamically creates OS-level windows
+			ImGui::UpdatePlatformWindows();
+			ImGui::RenderPlatformWindowsDefault();
+			glfwMakeContextCurrent(window); // Restore the context back to GLFW window
+		}
 
 		glfwSwapBuffers(window);
 	}

@@ -97,7 +97,7 @@ int main()
 	glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 	glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GLFW_TRUE);
 
-	GLFWwindow* window = glfwCreateWindow(sWidth, sHeight, "Cube", nullptr, nullptr);
+	GLFWwindow* window = glfwCreateWindow(sWidth, sHeight, "Mesh", nullptr, nullptr);
 	if (!window)
 	{
 		glfwTerminate();
