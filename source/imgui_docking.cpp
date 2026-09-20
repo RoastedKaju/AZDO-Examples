@@ -121,8 +121,13 @@ int main()
 	glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
 	glDebugMessageCallback(glDebugOutput, nullptr);
 
-	// enable depth testing
+	// Enable depth testing
 	glEnable(GL_DEPTH_TEST);
+	glDepthFunc(GL_LESS);
+	// Culling
+	glEnable(GL_CULL_FACE);
+	glCullFace(GL_BACK);
+	glFrontFace(GL_CCW);
 
 	// Buffer struct, must match the types in shader
 	struct DrawParams
