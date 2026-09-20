@@ -6,7 +6,10 @@
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
+#include <stb_image.h>
 #include <iostream>
+#include <vector>
+#include <string>
 
 static int sWidth = 800;
 static int sHeight = 600;
@@ -71,6 +74,24 @@ static GLuint CreateShaderProgram(const char* vertexShaderSource, const char* fr
 	glDeleteShader(vs);
 	glDeleteShader(fs);
 	return program;
+}
+
+static bool LoadImage(const char* path, std::vector<char>& outPixels, int& outWidth, int& outHeight)
+{
+	int width = 0, height = 0, sourceChannels = 0;
+	unsigned char* data = stbi_load(path, &width, &height, &sourceChannels, 4);
+	if (!data)
+	{
+		std::cerr << "Failed to load image: " << path << " (" << stbi_failure_reason() << ")" << std::endl;
+		return false;
+	}
+
+	outWidth = width;
+	outHeight = height;
+	outPixels.assign(data, data + (static_cast<size_t>(width) * height * 4));
+
+	stbi_image_free(data);
+	return true;
 }
 
 const char* unlitVertex = R"(
@@ -142,6 +163,55 @@ void main() {
 
 	FragColor = vec4(sceneColor, 1.0);
 }
+)";
+
+const char* thumbnailVertShader = R"(
+	#version 460 core
+	#extension GL_ARB_gpu_shader_int64 : require
+	layout (location = 0) in vec3 aPos;
+	layout (location = 1) in vec2 aTexCoord;
+
+	layout (location = 0) out vec2 vTexCoord;
+
+	struct FrameData {
+		mat4 MVP;
+		uvec2 textureHandle;
+	};
+
+	layout (std430, binding = 0)
+	buffer SceneData {
+		FrameData frameData;
+	};
+
+	void main() {
+		vTexCoord = aTexCoord;
+		gl_Position = frameData.MVP * vec4(aPos, 1.0);
+	}
+)";
+
+const char* thumbnailFragShader = R"(
+	#version 460 core
+	#extension GL_ARB_bindless_texture : require
+	#extension GL_ARB_gpu_shader_int64 : require
+	layout (location = 0) in vec2 vTexCoord;
+
+	layout (location = 0) out vec4 FragColor;
+
+	struct FrameData {
+		mat4 MVP;
+		uvec2 textureHandle; // Keep this GLuint64 on CPU side (bindless handle)
+	};
+
+	layout (std430, binding = 0)
+	buffer SceneData {
+		FrameData frameData;
+	};
+
+	void main() {
+		sampler2D bindlessTex = sampler2D(frameData.textureHandle);
+
+		FragColor = texture(bindlessTex, vTexCoord);
+	}
 )";
 
 // Data
@@ -232,6 +302,125 @@ static void DestroySceneTarget(SceneTarget& target)
 	if (target.depth) { glDeleteTextures(1, &target.depth);	target.depth = 0; }
 }
 
+struct QuadVertex
+{
+	glm::vec3 position;
+	glm::vec2 texCoord;
+};
+
+QuadVertex quadVertices[] = {
+	{ { -1.0f, -1.0f, 0.0f }, { 0.0f, 1.0f } },
+	{ {  1.0f, -1.0f, 0.0f }, { 1.0f, 1.0f } },
+	{ {  1.0f,  1.0f, 0.0f }, { 1.0f, 0.0f } },
+	{ { -1.0f,  1.0f, 0.0f }, { 0.0f, 0.0f } }
+};
+
+GLuint quadIndices[] = {
+	0, 1, 2,
+	2, 3, 0
+};
+
+struct PerDrawDataThumbnail
+{
+	glm::mat4 MVP;
+	GLuint64 textureHandle;
+};
+
+GLuint quadVAO, quadVBO, quadEBO, quadSSBO;
+
+static void GenerateQuad()
+{
+	glCreateBuffers(1, &quadVBO);
+	glNamedBufferStorage(quadVBO, sizeof(quadVertices), quadVertices, GL_DYNAMIC_STORAGE_BIT);
+
+	glCreateBuffers(1, &quadEBO);
+	glNamedBufferStorage(quadEBO, sizeof(quadIndices), quadIndices, GL_DYNAMIC_STORAGE_BIT);
+
+	glCreateBuffers(1, &quadSSBO);
+	glNamedBufferStorage(quadSSBO, sizeof(PerDrawDataThumbnail), nullptr, GL_DYNAMIC_STORAGE_BIT);
+	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, quadSSBO); // can use index 0 here as this will happen only once at start and cleaned-up
+
+	// VAO
+	glCreateVertexArrays(1, &quadVAO);
+
+	glEnableVertexArrayAttrib(quadVAO, 0);
+	glVertexArrayAttribFormat(quadVAO, 0, 3, GL_FLOAT, GL_FALSE, offsetof(QuadVertex, position));
+	glVertexArrayAttribBinding(quadVAO, 0, 0);
+
+	glEnableVertexArrayAttrib(quadVAO, 1);
+	glVertexArrayAttribFormat(quadVAO, 1, 2, GL_FLOAT, GL_FALSE, offsetof(QuadVertex, texCoord));
+	glVertexArrayAttribBinding(quadVAO, 1, 0);
+
+	glVertexArrayVertexBuffer(quadVAO, 0, quadVBO, 0, sizeof(QuadVertex)); // attach VBO to VAO
+	glVertexArrayElementBuffer(quadVAO, quadEBO); // attach EBO to VAO
+}
+
+std::vector<char> pixels;
+int debugImgWidth;
+int debugImgheight;
+GLuint debugTexture;
+GLuint64 debugtextureHandle;
+
+static void LoadDebugTexture()
+{
+	if (!LoadImage("../../../resources/textures/uv_tiles.png", pixels, debugImgWidth, debugImgheight))
+	{
+		exit(EXIT_FAILURE);
+	}
+	// Create texture
+	glCreateTextures(GL_TEXTURE_2D, 1, &debugTexture);
+	GLsizei levels = static_cast<GLsizei>(std::floor(std::log2(std::max(debugImgWidth, debugImgheight)))) + 1;
+	glTextureStorage2D(debugTexture, levels, GL_RGBA8, debugImgWidth, debugImgheight);
+	glTextureSubImage2D(debugTexture, 0, 0, 0, debugImgWidth, debugImgheight, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+	// Enable mipmapping and filtering
+	glGenerateTextureMipmap(debugTexture);
+	glTextureParameteri(debugTexture, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTextureParameteri(debugTexture, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glTextureParameteri(debugTexture, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+	glTextureParameteri(debugTexture, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	// Bindless texture
+	debugtextureHandle = glGetTextureHandleARB(debugTexture);
+	glMakeTextureHandleResidentARB(debugtextureHandle);
+}
+
+GLuint thumbnailShaderPrg;
+SceneTarget thumbnailTarget;
+static void RenderThumbnail()
+{
+	const int thumbnailSize = 512;
+
+	thumbnailShaderPrg = CreateShaderProgram(thumbnailVertShader, thumbnailFragShader);
+
+	glm::mat4 model = glm::mat4(1.0f);
+	glm::mat4 view = glm::lookAt(glm::vec3(0.0f, 0.0f, 3.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+	glm::mat4 proj = glm::perspective(glm::radians(45.0f), (float)thumbnailSize / (float)thumbnailSize, 0.1f, 100.0f);
+	glm::mat4 mvp = proj * view * model;
+
+	PerDrawDataThumbnail frameData{};
+	frameData.MVP = mvp;
+	frameData.textureHandle = debugtextureHandle;
+	// Send to GPU
+	glNamedBufferSubData(quadSSBO, 0, sizeof(PerDrawDataThumbnail), &frameData);
+
+	// Render target
+	thumbnailTarget = CreateSceneTarget(thumbnailSize, thumbnailSize);
+	glBindFramebuffer(GL_FRAMEBUFFER, thumbnailTarget.FBO);
+	glViewport(0, 0, thumbnailSize, thumbnailSize);
+	glEnable(GL_DEPTH_TEST);
+	glClearColor(0.5f, 0.12f, 0.5f, 1.0f);
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	glUseProgram(thumbnailShaderPrg);
+	glBindVertexArray(quadVAO);
+	glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr);
+
+	// cleanup
+	glDeleteProgram(thumbnailShaderPrg);
+	glDeleteVertexArrays(1, &quadVAO);
+	glDeleteBuffers(1, &quadVBO);
+	glDeleteBuffers(1, &quadEBO);
+	glDeleteBuffers(1, &quadSSBO);
+}
+
 int main()
 {
 	if (!glfwInit())
@@ -271,6 +460,12 @@ int main()
 	glEnable(GL_CULL_FACE);
 	glCullFace(GL_BACK);
 	glFrontFace(GL_CCW);
+
+	// Thumbnail generation
+	// The idea is to render one frame of mesh and delete it, use the resulting texture in our UI
+	GenerateQuad();
+	LoadDebugTexture();
+	RenderThumbnail();
 
 	// Buffers
 	GLuint VAO, VBO, EBO, SSBO;
@@ -387,6 +582,8 @@ int main()
 		ImGui::NewFrame();
 
 		ImGui::Begin("Thumbnail");
+		ImVec2 availableSizeThumbnail = ImGui::GetContentRegionAvail();
+		ImGui::Image((ImTextureID)(intptr_t)thumbnailTarget.color, availableSizeThumbnail, ImVec2(0, 1), ImVec2(1, 0));
 		ImGui::End();
 
 		ImGui::Begin("Render Target");
@@ -406,7 +603,15 @@ int main()
 	ImGui_ImplGlfw_Shutdown();
 	ImGui::DestroyContext();
 
+	glDeleteProgram(unlit);
+	glDeleteVertexArrays(1, &VAO);
+	glDeleteBuffers(1, &VBO);
+	glDeleteBuffers(1, &EBO);
+	glDeleteBuffers(1, &SSBO);
 	DestroySceneTarget(scene);
+	// Destroy thumbnail target
+	DestroySceneTarget(thumbnailTarget);
+	// GLFW
 	glfwDestroyWindow(window);
 	glfwTerminate();
 	return EXIT_SUCCESS;
