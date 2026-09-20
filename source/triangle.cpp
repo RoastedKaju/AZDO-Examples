@@ -109,7 +109,8 @@ int main()
 		return EXIT_FAILURE;
 	}
 
-	glViewport(0, 0, 800, 600);
+	glfwGetFramebufferSize(window, &sWidth, &sHeight);
+	glViewport(0, 0, sWidth, sHeight);
 
 	// Enable OpenGL debug output
 	glEnable(GL_DEBUG_OUTPUT);
@@ -156,6 +157,12 @@ int main()
 	while (!glfwWindowShouldClose(window))
 	{
 		glfwPollEvents();
+
+		if (sWidth == 0 || sHeight == 0)
+		{
+			glfwWaitEvents();
+			continue;
+		}
 
 		glClearColor(0.1f, 0.12f, 0.1f, 1.0f);
 		glClear(GL_COLOR_BUFFER_BIT);

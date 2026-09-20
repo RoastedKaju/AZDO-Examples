@@ -448,6 +448,7 @@ int main()
 
 	// Use the real frame-buffer size (differs from window size on HiDPI displays)
 	glfwGetFramebufferSize(window, &sWidth, &sHeight);
+	glViewport(0, 0, sWidth, sHeight);
 
 	glEnable(GL_DEBUG_OUTPUT);
 	glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);

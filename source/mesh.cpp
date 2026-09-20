@@ -110,7 +110,10 @@ int main()
 	int version = gladLoadGL(glfwGetProcAddress);
 	if (!version) return EXIT_FAILURE;
 
+	// On High-DPI displays, the window size and frame buffer size maybe different so you must get the frame buffer size
+	glfwGetFramebufferSize(window, &sWidth, &sHeight);
 	glViewport(0, 0, sWidth, sHeight);
+
 	glEnable(GL_DEBUG_OUTPUT);
 	glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
 	glDebugMessageCallback(glDebugOutput, nullptr);
@@ -191,6 +194,12 @@ int main()
 	while (!glfwWindowShouldClose(window))
 	{
 		glfwPollEvents();
+
+		if (sWidth == 0 || sHeight == 0)
+		{
+			glfwWaitEvents();
+			continue;
+		}
 
 		float time = (float)glfwGetTime();
 

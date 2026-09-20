@@ -1,7 +1,3 @@
-cmake_minimum_required(VERSION 3.10)
-
-project(imgui CXX)
-
 set(IMGUI_SOURCES
     imgui.cpp
     imgui_draw.cpp
@@ -14,7 +10,7 @@ list(APPEND IMGUI_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/backends/imgui_impl_glfw.c
 list(APPEND IMGUI_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp)
 
 add_library(imgui STATIC ${IMGUI_SOURCES})
-
+# Use System to suppress warnings coming from ImGUI
 target_include_directories(imgui SYSTEM PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/backends

@@ -1,4 +1,4 @@
-﻿cmake_minimum_required(VERSION 3.10)
+﻿cmake_minimum_required(VERSION 3.24)
 project("AZDO")
 
 set(CMAKE_CXX_STANDARD 20)
@@ -32,3 +32,4 @@ example(Model "source/model.cpp")
 example(Text "source/text.cpp")
 example(ImGUIDocking "source/imgui_docking.cpp")
 example(FrameBuffers "source/framebuffers.cpp")
+example(Animations "source/animations.cpp")

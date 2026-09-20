@@ -481,6 +481,7 @@ static Model LoadModel(const std::string& filePath, const FallbackTextures& fall
 		{
 			// External image file, referenced relative to the .gltf file.
 			std::cerr << "External image file not currently supported.\n";
+			tg3_model_free(&model);
 			return {};
 		}
 		else if (image.buffer_view >= 0)
@@ -725,6 +726,7 @@ int main()
 		return EXIT_FAILURE;
 	}
 
+	glfwGetFramebufferSize(window, &sWidth, &sHeight);
 	glViewport(0, 0, sWidth, sHeight);
 
 	glEnable(GL_DEBUG_OUTPUT);
@@ -756,6 +758,12 @@ int main()
 	while (!glfwWindowShouldClose(window))
 	{
 		glfwPollEvents();
+
+		if (sWidth == 0 || sHeight == 0)
+		{
+			glfwWaitEvents();
+			continue;
+		}
 
 		float time = (float)glfwGetTime();
 

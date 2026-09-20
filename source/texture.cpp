@@ -161,7 +161,6 @@ int main()
 
 	int version = gladLoadGL(glfwGetProcAddress);
 	if (!version) return EXIT_FAILURE;
-
 	// Check extensions
 	if (!GLAD_GL_ARB_bindless_texture)
 	{
@@ -179,7 +178,9 @@ int main()
 	printf("Version: %s\n", glGetString(GL_VERSION));
 	printf("GLSL: %s\n", glGetString(GL_SHADING_LANGUAGE_VERSION));
 
+	glfwGetFramebufferSize(window, &sWidth, &sHeight);
 	glViewport(0, 0, sWidth, sHeight);
+
 	glEnable(GL_DEBUG_OUTPUT);
 	glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
 	glDebugMessageCallback(glDebugOutput, nullptr);
@@ -246,6 +247,7 @@ int main()
 
 	GLuint shaderProgram = CreateShaderProgram();
 
+	// Load image from file
 	std::vector<char> pixels;
 	int width;
 	int height;
@@ -279,8 +281,13 @@ int main()
 	{
 		glfwPollEvents();
 
-		float time = (float)glfwGetTime();
+		if (sWidth == 0 || sHeight == 0)
+		{
+			glfwWaitEvents();
+			continue;
+		}
 
+		float time = (float)glfwGetTime();
 		float cameraZ = std::sin(time) + 2.5f;
 
 		glm::mat4 model = glm::mat4(1.0f);
