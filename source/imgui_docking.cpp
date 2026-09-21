@@ -35,17 +35,15 @@ const char* vertexShaderSource = R"(
 
 	layout (location = 0) out vec3 vColor;
 
-	struct DrawParams {
+	layout (std140, binding = 0)
+	uniform FrameData{
 		mat4 mvp;
-		vec4 wireframeColor;
-	};
-
-	layout (std430, binding = 0)
-	buffer SceneData { DrawParams data; };
+		bool showWireframe;
+	} frameData;
 
 	void main() {
 		vColor = aColor;
-		gl_Position = data.mvp * vec4(aPos, 1.0);
+		gl_Position = frameData.mvp * vec4(aPos, 1.0);
 	}
 )";
 
@@ -54,19 +52,22 @@ const char* fragmentShaderSource = R"(
 	layout (location = 0) in vec3 vColor;
 	layout (location = 0) out vec4 FragColor;
 
-	struct DrawParams {
+	layout (std140, binding = 0)
+	uniform FrameData{
 		mat4 mvp;
-		vec4 wireframeColor;
-	};
+		bool showWireframe;
+	} frameData;
 
-	layout (std430, binding = 0)
-	buffer SceneData { DrawParams data; };
+	layout(std430, binding = 0)
+	buffer ObjectData {
+		vec3 wireframeColor;
+	} objectData;
 
 	void main() {
-		if(data.wireframeColor.a > 0.0) {
-			FragColor = data.wireframeColor;
+		if(frameData.showWireframe) {
+			FragColor = vec4(objectData.wireframeColor, 1.0);
 		} else {
-		FragColor = vec4(vColor, 1.0);
+			FragColor = vec4(vColor, 1.0);
 		}
 	}
 )";
@@ -131,11 +132,11 @@ int main()
 	glCullFace(GL_BACK);
 	glFrontFace(GL_CCW);
 
-	// Buffer struct, must match the types in shader
-	struct DrawParams
+	// Per-Frame Data Must match with shader
+	struct FrameData
 	{
 		glm::mat4 mvp;
-		glm::vec4 wireframeColor;
+		GLuint showWireframe; // Since shader uses std140, use 4 bytes for a boolean value
 	};
 
 	// Vertex
@@ -172,7 +173,7 @@ int main()
 	};
 
 	// DSA buffers
-	GLuint VBO, EBO, SSBO;
+	GLuint VBO, EBO, UBO, SSBO;
 
 	glCreateBuffers(1, &VBO);
 	glNamedBufferStorage(VBO, sizeof(vertices), vertices, GL_DYNAMIC_STORAGE_BIT);
@@ -180,8 +181,12 @@ int main()
 	glCreateBuffers(1, &EBO);
 	glNamedBufferStorage(EBO, sizeof(indices), indices, GL_DYNAMIC_STORAGE_BIT);
 
+	glCreateBuffers(1, &UBO);
+	glNamedBufferStorage(UBO, sizeof(FrameData), nullptr, GL_DYNAMIC_STORAGE_BIT);
+	glBindBufferBase(GL_UNIFORM_BUFFER, 0, UBO);
+
 	glCreateBuffers(1, &SSBO);
-	glNamedBufferStorage(SSBO, sizeof(DrawParams), nullptr, GL_DYNAMIC_STORAGE_BIT);
+	glNamedBufferStorage(SSBO, sizeof(glm::vec3), nullptr, GL_DYNAMIC_STORAGE_BIT);
 	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, SSBO);
 
 	// VAO
@@ -224,13 +229,11 @@ int main()
 		glm::mat4 model = glm::rotate(glm::mat4(1.0f), time * glm::radians(50.0f), glm::vec3(0.5f, 1.0f, 0.0f));
 		glm::mat4 view = glm::lookAt(glm::vec3(0.0f, 0.0f, 3.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
 		glm::mat4 proj = glm::perspective(glm::radians(45.0f), (float)sWidth / (float)sHeight, 0.1f, 100.0f);
-
 		glm::mat4 mvp = proj * view * model;
 
-		// AZDO stream: update SSBO directly via DSA
-		DrawParams params{};
-		params.mvp = mvp;
-		glNamedBufferSubData(SSBO, 0, sizeof(DrawParams), &params);
+		// Push Frame-Data to UBO
+		FrameData frameData{ .mvp = mvp, .showWireframe = false };
+		glNamedBufferSubData(UBO, 0, sizeof(FrameData), &frameData);
 
 		// Clear
 		glClearColor(0.1f, 0.12f, 0.1f, 1.0f);
@@ -243,9 +246,13 @@ int main()
 		// Render wireframe
 		if (sDrawWireFrame)
 		{
-			params.wireframeColor = glm::vec4(sWireFrameColor[0], sWireFrameColor[1], sWireFrameColor[2], 1.0f);
-			glNamedBufferSubData(SSBO, 0, sizeof(DrawParams), &params);
-			// 
+			// Push Frame-Data to UBO with wireframe enabled
+			frameData.showWireframe = true;
+			glNamedBufferSubData(UBO, 0, sizeof(FrameData), &frameData);
+			// Push Color value to SSBO
+			glm::vec3 wireframeColor = glm::vec3(sWireFrameColor[0], sWireFrameColor[1], sWireFrameColor[2]);
+			glNamedBufferSubData(SSBO, 0, sizeof(glm::vec3), &wireframeColor);
+			// Change polygon to lines
 			glEnable(GL_POLYGON_OFFSET_LINE);
 			glPolygonOffset(-1.0f, -1.0f);
 			glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
@@ -294,6 +301,7 @@ int main()
 	glDeleteVertexArrays(1, &VAO);
 	glDeleteBuffers(1, &VBO);
 	glDeleteBuffers(1, &EBO);
+	glDeleteBuffers(1, &UBO);
 	glDeleteBuffers(1, &SSBO);
 	glfwDestroyWindow(window);
 	glfwTerminate();

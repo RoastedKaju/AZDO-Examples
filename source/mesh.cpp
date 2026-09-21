@@ -34,8 +34,10 @@ const char* vertexShaderSource = R"(
 		vec4 wireframeColor;
 	};
 
-	layout (std430, binding = 0)
-	buffer SceneData { DrawParams data; };
+	// In SSBO the 'uniform' changes to 'buffer'
+	// std430 for SSBO, 140 for UBO
+	layout (std140, binding = 0)
+	uniform SceneData { DrawParams data; };
 
 	void main() {
 		vColor = aColor;
@@ -53,8 +55,10 @@ const char* fragmentShaderSource = R"(
 		vec4 wireframeColor;
 	};
 
-	layout (std430, binding = 0)
-	buffer SceneData { DrawParams data; };
+	// In SSBO the 'uniform' changes to 'buffer'
+	// std430 for SSBO, 140 for UBO
+	layout (std140, binding = 0)
+	uniform SceneData { DrawParams data; };
 
 	void main() {
 		if(data.wireframeColor.a > 0.0) {
@@ -65,20 +69,47 @@ const char* fragmentShaderSource = R"(
 	}
 )";
 
-static GLuint CreateShaderProgram()
+static GLuint CompileShader(GLenum type, const char* source)
 {
-	GLuint vs = glCreateShader(GL_VERTEX_SHADER);
-	glShaderSource(vs, 1, &vertexShaderSource, nullptr);
-	glCompileShader(vs);
+	GLuint shader = glCreateShader(type);
+	glShaderSource(shader, 1, &source, nullptr);
+	glCompileShader(shader);
 
-	GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
-	glShaderSource(fs, 1, &fragmentShaderSource, nullptr);
-	glCompileShader(fs);
+	GLint success = 0;
+	glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
+	if (!success)
+	{
+		GLint logLen = 0;
+		glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &logLen);
+		std::string log(logLen, '\0');
+		glGetShaderInfoLog(shader, logLen, nullptr, log.data());
+		std::cerr << "Shader compile error (" << (type == GL_VERTEX_SHADER ? "vertex" : "fragment") << "):\n" << log << std::endl;
+		exit(EXIT_FAILURE);
+	}
+	return shader;
+}
+
+static GLuint CreateShaderProgram(const char* vertexShaderSource, const char* fragmentShaderSource)
+{
+	GLuint vs = CompileShader(GL_VERTEX_SHADER, vertexShaderSource);
+	GLuint fs = CompileShader(GL_FRAGMENT_SHADER, fragmentShaderSource);
 
 	GLuint program = glCreateProgram();
 	glAttachShader(program, vs);
 	glAttachShader(program, fs);
 	glLinkProgram(program);
+
+	GLint linked = 0;
+	glGetProgramiv(program, GL_LINK_STATUS, &linked);
+	if (!linked)
+	{
+		GLint logLen = 0;
+		glGetProgramiv(program, GL_INFO_LOG_LENGTH, &logLen);
+		std::string log(logLen, '\0');
+		glGetProgramInfoLog(program, logLen, nullptr, log.data());
+		std::cerr << "Program link error:\n" << log << std::endl;
+		exit(EXIT_FAILURE);
+	}
 
 	glDeleteShader(vs);
 	glDeleteShader(fs);
@@ -162,7 +193,8 @@ int main()
 	};
 
 	// DSA buffers
-	GLuint VBO, EBO, SSBO;
+	GLuint VBO, EBO, UBO;
+	//GLuint SSBO;
 
 	glCreateBuffers(1, &VBO);
 	glNamedBufferStorage(VBO, sizeof(vertices), vertices, GL_DYNAMIC_STORAGE_BIT);
@@ -170,9 +202,14 @@ int main()
 	glCreateBuffers(1, &EBO);
 	glNamedBufferStorage(EBO, sizeof(indices), indices, GL_DYNAMIC_STORAGE_BIT);
 
-	glCreateBuffers(1, &SSBO);
-	glNamedBufferStorage(SSBO, sizeof(DrawParams), nullptr, GL_DYNAMIC_STORAGE_BIT);
-	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, SSBO);
+	// This is how you create and bind a SSBO to index 0
+	//glCreateBuffers(1, &SSBO);
+	//glNamedBufferStorage(SSBO, sizeof(DrawParams), nullptr, GL_DYNAMIC_STORAGE_BIT);
+	//glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, SSBO);
+
+	glCreateBuffers(1, &UBO);
+	glNamedBufferStorage(UBO, sizeof(DrawParams), nullptr, GL_DYNAMIC_STORAGE_BIT);
+	glBindBufferBase(GL_UNIFORM_BUFFER, 0, UBO);
 
 	// VAO
 	GLuint VAO;
@@ -189,7 +226,7 @@ int main()
 	glVertexArrayVertexBuffer(VAO, 0, VBO, 0, sizeof(Vertex)); // attach VBO to VAO
 	glVertexArrayElementBuffer(VAO, EBO); // attach EBO to VAO
 
-	GLuint shaderProgram = CreateShaderProgram();
+	GLuint shaderProgram = CreateShaderProgram(vertexShaderSource, fragmentShaderSource);
 
 	while (!glfwWindowShouldClose(window))
 	{
@@ -209,10 +246,10 @@ int main()
 
 		glm::mat4 mvp = proj * view * model;
 
-		// AZDO stream: update SSBO directly via DSA
+		// AZDO stream: update UBO directly via DSA
 		DrawParams params{};
 		params.mvp = mvp;
-		glNamedBufferSubData(SSBO, 0, sizeof(DrawParams), &params);
+		glNamedBufferSubData(UBO, 0, sizeof(DrawParams), &params);
 
 		// Clear
 		glClearColor(0.1f, 0.12f, 0.1f, 1.0f);
@@ -224,7 +261,7 @@ int main()
 
 		// Render wireframe
 		params.wireframeColor = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
-		glNamedBufferSubData(SSBO, 0, sizeof(DrawParams), &params);
+		glNamedBufferSubData(UBO, 0, sizeof(DrawParams), &params);
 		glEnable(GL_POLYGON_OFFSET_LINE);
 		glPolygonOffset(-1.0f, -1.0f);
 		glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
@@ -241,7 +278,7 @@ int main()
 	glDeleteVertexArrays(1, &VAO);
 	glDeleteBuffers(1, &VBO);
 	glDeleteBuffers(1, &EBO);
-	glDeleteBuffers(1, &SSBO);
+	glDeleteBuffers(1, &UBO);
 	glfwDestroyWindow(window);
 	glfwTerminate();
 	return EXIT_SUCCESS;

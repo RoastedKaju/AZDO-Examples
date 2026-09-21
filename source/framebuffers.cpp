@@ -102,13 +102,14 @@ layout (location = 1) in vec3 aColor;
 
 layout (location = 0) out vec3 vColor;
 
-layout (std430, binding = 0) readonly buffer PerDrawData{
-	mat4 uMVP;
-};
+layout (std140, binding = 0) readonly
+uniform FrameData {
+	mat4 MVP;
+} frameData;
 
 void main() {
 	vColor = aColor;
-	gl_Position = uMVP * vec4(aPos, 1.0);
+	gl_Position = frameData.MVP * vec4(aPos, 1.0);
 }
 )";
 
@@ -150,12 +151,13 @@ const char* postProcessFrag = R"(
 layout (location = 0) in vec2 uv;
 layout (location = 0) out vec4 FragColor;
 
-layout (std430, binding = 1) readonly buffer PerDrawData {
-	uvec2 uSceneTextureHandle;
-};
+layout (std430, binding = 0) readonly
+buffer ObjectData {
+	uvec2 sceneColorHandle;
+} objectData;
 
 void main() {
-	sampler2D sceneTex = sampler2D(uSceneTextureHandle);
+	sampler2D sceneTex = sampler2D(objectData.sceneColorHandle);
 	vec3 sceneColor = texture(sceneTex, uv).rgb;
 
 	// Apply gamma correction
@@ -173,15 +175,11 @@ const char* thumbnailVertShader = R"(
 
 	layout (location = 0) out vec2 vTexCoord;
 
-	struct FrameData {
+	layout (std140, binding = 0) readonly
+	uniform FrameData{
 		mat4 MVP;
-		uvec2 textureHandle;
-	};
-
-	layout (std430, binding = 0)
-	buffer SceneData {
-		FrameData frameData;
-	};
+		uvec2 baseColorHandle;
+	} frameData;
 
 	void main() {
 		vTexCoord = aTexCoord;
@@ -197,20 +195,15 @@ const char* thumbnailFragShader = R"(
 
 	layout (location = 0) out vec4 FragColor;
 
-	struct FrameData {
+	layout (std140, binding = 0) readonly
+	uniform FrameData{
 		mat4 MVP;
-		uvec2 textureHandle; // Keep this GLuint64 on CPU side (bindless handle)
-	};
-
-	layout (std430, binding = 0)
-	buffer SceneData {
-		FrameData frameData;
-	};
+		uvec2 baseColorHandle;
+	} frameData;
 
 	void main() {
-		sampler2D bindlessTex = sampler2D(frameData.textureHandle);
-
-		FragColor = texture(bindlessTex, vTexCoord);
+		sampler2D sampler = sampler2D(frameData.baseColorHandle);
+		FragColor = texture(sampler, vTexCoord);
 	}
 )";
 
@@ -326,7 +319,7 @@ struct PerDrawDataThumbnail
 	GLuint64 textureHandle;
 };
 
-GLuint quadVAO, quadVBO, quadEBO, quadSSBO;
+GLuint quadVAO, quadVBO, quadEBO, quadUBO;
 
 static void GenerateQuad()
 {
@@ -336,9 +329,9 @@ static void GenerateQuad()
 	glCreateBuffers(1, &quadEBO);
 	glNamedBufferStorage(quadEBO, sizeof(quadIndices), quadIndices, GL_DYNAMIC_STORAGE_BIT);
 
-	glCreateBuffers(1, &quadSSBO);
-	glNamedBufferStorage(quadSSBO, sizeof(PerDrawDataThumbnail), nullptr, GL_DYNAMIC_STORAGE_BIT);
-	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, quadSSBO); // can use index 0 here as this will happen only once at start and cleaned-up
+	glCreateBuffers(1, &quadUBO);
+	glNamedBufferStorage(quadUBO, sizeof(PerDrawDataThumbnail), nullptr, GL_DYNAMIC_STORAGE_BIT);
+	glBindBufferBase(GL_UNIFORM_BUFFER, 0, quadUBO); // can use index 0 here as this will happen only once at start and cleaned-up
 
 	// VAO
 	glCreateVertexArrays(1, &quadVAO);
@@ -400,7 +393,7 @@ static void RenderThumbnail()
 	frameData.MVP = mvp;
 	frameData.textureHandle = debugtextureHandle;
 	// Send to GPU
-	glNamedBufferSubData(quadSSBO, 0, sizeof(PerDrawDataThumbnail), &frameData);
+	glNamedBufferSubData(quadUBO, 0, sizeof(PerDrawDataThumbnail), &frameData);
 
 	// Render target
 	thumbnailTarget = CreateSceneTarget(thumbnailSize, thumbnailSize);
@@ -418,7 +411,7 @@ static void RenderThumbnail()
 	glDeleteVertexArrays(1, &quadVAO);
 	glDeleteBuffers(1, &quadVBO);
 	glDeleteBuffers(1, &quadEBO);
-	glDeleteBuffers(1, &quadSSBO);
+	glDeleteBuffers(1, &quadUBO);
 }
 
 int main()
@@ -469,7 +462,7 @@ int main()
 	RenderThumbnail();
 
 	// Buffers
-	GLuint VAO, VBO, EBO, SSBO;
+	GLuint VAO, VBO, EBO, UBO;
 
 	glCreateBuffers(1, &VBO);
 	glNamedBufferStorage(VBO, sizeof(pyramidVertices), pyramidVertices, 0);
@@ -477,9 +470,10 @@ int main()
 	glCreateBuffers(1, &EBO);
 	glNamedBufferStorage(EBO, sizeof(pyramidIndices), pyramidIndices, 0);
 
-	glCreateBuffers(1, &SSBO);
-	glNamedBufferStorage(SSBO, sizeof(glm::mat4), nullptr, GL_DYNAMIC_STORAGE_BIT);
-	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, SSBO);
+	// Per-Frame MVP data
+	glCreateBuffers(1, &UBO);
+	glNamedBufferStorage(UBO, sizeof(glm::mat4), nullptr, GL_DYNAMIC_STORAGE_BIT);
+	glBindBufferBase(GL_UNIFORM_BUFFER, 0, UBO);
 
 	// Attach buffers with VAO
 	glCreateVertexArrays(1, &VAO);
@@ -502,7 +496,7 @@ int main()
 	// No need for a VBO or EBO
 	glCreateBuffers(1, &postProcessSSBO);
 	glNamedBufferStorage(postProcessSSBO, sizeof(GLuint64), nullptr, GL_DYNAMIC_STORAGE_BIT);
-	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, postProcessSSBO); // Index 1 here, 0 is for unlit shaders
+	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, postProcessSSBO);
 
 	// Scene frame buffer
 	// This is where we will be rendering our pyramid scene to
@@ -550,9 +544,8 @@ int main()
 		glm::mat4 proj = glm::perspective(glm::radians(45.0f), (float)sWidth / (float)sHeight, 0.1f, 100.0f);
 		glm::mat4 MVP = proj * view * model;
 
-		PerDrawData perFrameData{};
-		perFrameData.MVP = MVP;
-		glNamedBufferSubData(SSBO, 0, sizeof(perFrameData), &perFrameData);
+		// Send MVP to UBO for per frame data
+		glNamedBufferSubData(UBO, 0, sizeof(glm::mat4), &MVP);
 
 		// Pyramid scene pass
 		glBindFramebuffer(GL_FRAMEBUFFER, scene.FBO);
@@ -608,7 +601,8 @@ int main()
 	glDeleteVertexArrays(1, &VAO);
 	glDeleteBuffers(1, &VBO);
 	glDeleteBuffers(1, &EBO);
-	glDeleteBuffers(1, &SSBO);
+	glDeleteBuffers(1, &UBO);
+
 	DestroySceneTarget(scene);
 	// Destroy thumbnail target
 	DestroySceneTarget(thumbnailTarget);

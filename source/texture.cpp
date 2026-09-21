@@ -33,19 +33,14 @@ const char* vertexShaderSource = R"(
 
 	layout (location = 0) out vec2 vTexCoord;
 
-	struct FrameData {
+	layout (std140, binding = 0)
+	uniform FrameData {
 		mat4 MVP;
-		uvec2 textureHandle;
-	};
-
-	layout (std430, binding = 0)
-	buffer SceneData {
-		FrameData frameData;
 	};
 
 	void main() {
 		vTexCoord = aTexCoord;
-		gl_Position = frameData.MVP * vec4(aPos, 1.0);
+		gl_Position = MVP * vec4(aPos, 1.0);
 	}
 )";
 
@@ -57,20 +52,15 @@ const char* fragmentShaderSource = R"(
 
 	layout (location = 0) out vec4 FragColor;
 
-	struct FrameData {
-		mat4 MVP;
-		uvec2 textureHandle; // Keep this GLuint64 on CPU side (bindless handle)
-	};
-
-	layout (std430, binding = 0)
-	buffer SceneData {
-		FrameData frameData;
-	};
+	layout(std430, binding = 0)
+	buffer ObjectData {
+		uvec2 colorHandle;
+	} objectData;
 
 	void main() {
-		sampler2D bindlessTex = sampler2D(frameData.textureHandle);
+		sampler2D baseColorSampler = sampler2D(objectData.colorHandle);
 
-		FragColor = texture(bindlessTex, vTexCoord);
+		FragColor = texture(baseColorSampler, vTexCoord);
 	}
 )";
 
@@ -193,13 +183,6 @@ int main()
 	glCullFace(GL_BACK);
 	glFrontFace(GL_CCW);
 
-	// C++ Mirror Struct matching SSBO layout
-	struct FrameData
-	{
-		glm::mat4 mvp;
-		GLuint64 textureHandle; // 64-bit GPU address
-	};
-
 	struct Vertex
 	{
 		glm::vec3 position;
@@ -218,7 +201,7 @@ int main()
 		2, 3, 0
 	};
 
-	GLuint VBO, EBO, SSBO;
+	GLuint VBO, EBO, UBO, SSBO;
 
 	glCreateBuffers(1, &VBO);
 	glNamedBufferStorage(VBO, sizeof(vertices), vertices, GL_DYNAMIC_STORAGE_BIT);
@@ -226,8 +209,13 @@ int main()
 	glCreateBuffers(1, &EBO);
 	glNamedBufferStorage(EBO, sizeof(indices), indices, GL_DYNAMIC_STORAGE_BIT);
 
+	// For per frame data
+	glCreateBuffers(1, &UBO);
+	glNamedBufferStorage(UBO, sizeof(glm::mat4), nullptr, GL_DYNAMIC_STORAGE_BIT);
+	glBindBufferBase(GL_UNIFORM_BUFFER, 0, UBO);
+	// For per object data
 	glCreateBuffers(1, &SSBO);
-	glNamedBufferStorage(SSBO, sizeof(FrameData), nullptr, GL_DYNAMIC_STORAGE_BIT);
+	glNamedBufferStorage(SSBO, sizeof(GLuint64), nullptr, GL_DYNAMIC_STORAGE_BIT);
 	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, SSBO);
 
 	// VAO
@@ -274,8 +262,8 @@ int main()
 	GLuint64 textureHandle = glGetTextureHandleARB(debugTexture);
 	glMakeTextureHandleResidentARB(textureHandle);
 
-	FrameData frameData{};
-	frameData.textureHandle = textureHandle;
+	// Upload texture handle to SSBO once
+	glNamedBufferSubData(SSBO, 0, sizeof(GLuint64), &textureHandle);
 
 	while (!glfwWindowShouldClose(window))
 	{
@@ -293,12 +281,10 @@ int main()
 		glm::mat4 model = glm::mat4(1.0f);
 		glm::mat4 view = glm::lookAt(glm::vec3(0.0f, 0.0f, cameraZ), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
 		glm::mat4 proj = glm::perspective(glm::radians(45.0f), (float)sWidth / (float)sHeight, 0.1f, 100.0f);
-
 		glm::mat4 mvp = proj * view * model;
 
-		// Direct stream MVP to SSBO
-		frameData.mvp = mvp;
-		glNamedBufferSubData(SSBO, 0, sizeof(FrameData), &frameData);
+		// Upload MVP per frame to UBO
+		glNamedBufferSubData(UBO, 0, sizeof(glm::mat4), &mvp);
 
 		glClearColor(0.1f, 0.12f, 0.1f, 1.0f);
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -316,6 +302,7 @@ int main()
 	glDeleteVertexArrays(1, &VAO);
 	glDeleteBuffers(1, &VBO);
 	glDeleteBuffers(1, &EBO);
+	glDeleteBuffers(1, &UBO);
 	glDeleteBuffers(1, &SSBO);
 	glfwDestroyWindow(window);
 	glfwTerminate();
