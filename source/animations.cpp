@@ -3,6 +3,8 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
+#define GLM_ENABLE_EXPERIMENTAL
+#include <glm/gtx/matrix_decompose.hpp>
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
@@ -12,6 +14,8 @@
 #include <filesystem>
 #include <vector>
 #include <string>
+#include <functional>
+#include <algorithm>
 
 static int sWidth = 800;
 static int sHeight = 600;
@@ -24,6 +28,8 @@ layout (location = 0) in vec3 aPos;
 layout (location = 1) in vec2 aTexCoord;
 layout (location = 2) in vec3 aNormal;
 layout (location = 3) in vec4 aTangent;
+layout (location = 4) in uvec4 aJoints;
+layout (location = 5) in vec4 aWeights;
 
 layout (location = 0) out vec2 vTexCoord;
 
@@ -39,9 +45,21 @@ layout (std430, binding = 0) buffer SceneData {
 	FrameData frameData;
 };
 
+layout (std430, binding = 1) readonly buffer Bones {
+	mat4 bones[];
+};
+
+uniform int uSkinned;
+
 void main() {
 	vTexCoord = aTexCoord;
-	gl_Position = frameData.proj * frameData.view * frameData.model * vec4(aPos, 1.0);
+
+	vec4 pos = vec4(aPos, 1.0);
+	if (uSkinned != 0) {
+		mat4 skin = aWeights.x * bones[aJoints.x] + aWeights.y * bones[aJoints.y] + aWeights.z * bones[aJoints.z] + aWeights.w * bones[aJoints.w];
+		pos = skin * pos;
+	}
+	gl_Position = frameData.proj * frameData.view * frameData.model * pos;
 }
 )";
 
@@ -138,6 +156,8 @@ struct Vertex
 	glm::vec2 texCoord;
 	glm::vec3 normal;
 	glm::vec4 tangent;
+	glm::uvec4 joints;
+	glm::vec4 weights;
 };
 
 struct FrameData
@@ -162,11 +182,54 @@ struct Primitive
 	glm::vec4 baseColorFactor = glm::vec4(1.0f);
 };
 
+struct Joint
+{
+	std::string name;
+	int parent = -1;
+	glm::mat4 inverseBind{ 1.0f };
+	glm::vec3 restT{ 0.0f };
+	glm::quat restR{ 1.0f, 0.0f, 0.0f, 0.0f };
+	glm::vec3 restS{ 1.0f };
+	glm::mat4 parentGlobal{ 1.0f };
+};
+
+struct Skeleton
+{
+	std::vector<Joint> joints;
+	std::vector<int> order;
+};
+
 struct Model
 {
 	std::vector<Primitive> primitives;
 	std::vector<GLuint> textureIds;
 	std::vector<GLuint64> textureHandles;
+	Skeleton skeleton;
+};
+
+// Animation structs
+/**
+* A channel represents the change of a single property on a single target object over time
+*/
+struct Channel
+{
+	enum Path { Translation, Rotation, Scale } path = Translation;
+	enum Interp { Linear, Step, CubicSpline }    interp = Linear;
+
+	int targetNode = -1;			// node index in the file the clip was loaded from
+	std::string targetName;			// node name, for binding to a skeleton
+
+	std::vector<float>     times;
+	std::vector<glm::vec4> values;			// one per key: Vec-3 in XYZ, Quat in XYZW (glTF order)
+	std::vector<glm::vec4> inTangents;		// Cubic-Spline only, same length as values
+	std::vector<glm::vec4> outTangents;		// Cubic-Spline only
+};
+
+struct AnimationClip
+{
+	std::string name;
+	float duration = 0.0f;
+	std::vector<Channel> channels;
 };
 
 struct FallbackTextures
@@ -299,6 +362,104 @@ static const unsigned char* GetAccessorData(const tg3_model& model, int accessor
 	return buffer.data.data + view.byte_offset + accessor.byte_offset;
 }
 
+static glm::mat4 NodeLocalMatrix(const tg3_node& n, glm::vec3& t, glm::quat& r, glm::vec3& s)
+{
+	if (n.has_matrix)
+	{
+		glm::mat4 m;
+		for (int i = 0; i < 16; ++i) m[i / 4][i % 4] = (float)n.matrix[i];  // column-major
+		glm::vec3 skew; glm::vec4 persp;
+		glm::decompose(m, s, r, t, skew, persp);
+		return m;
+	}
+
+	t = glm::vec3((float)n.translation[0], (float)n.translation[1], (float)n.translation[2]);
+	r = glm::quat((float)n.rotation[3], (float)n.rotation[0], (float)n.rotation[1], (float)n.rotation[2]);
+	s = glm::vec3((float)n.scale[0], (float)n.scale[1], (float)n.scale[2]);
+	return glm::translate(glm::mat4(1.0f), t) * glm::mat4_cast(glm::normalize(r)) * glm::scale(glm::mat4(1.0f), s);
+}
+
+static Skeleton BuildSkeleton(const tg3_model& model)
+{
+	Skeleton skel;
+	if (model.skins_count == 0) return skel;
+
+	const tg3_skin& skin = model.skins[0]; // assumes one skin
+	const uint32_t jointCount = skin.joints_count;
+
+	if (model.skins_count > 1)
+	{
+		std::cerr << "Warning: " << model.skins_count << " skins found, only using skin 0\n";
+	}
+
+	// node -> parent node, node -> joint index
+	std::vector<int> nodeParent(model.nodes_count, -1);
+	for (uint32_t n = 0; n < model.nodes_count; ++n)
+		for (uint32_t c = 0; c < model.nodes[n].children_count; ++c)
+			nodeParent[model.nodes[n].children[c]] = (int)n;
+
+	std::vector<int> nodeToJoint(model.nodes_count, -1);
+	for (uint32_t j = 0; j < jointCount; ++j)
+		nodeToJoint[skin.joints[j]] = (int)j;
+
+	// Inverse bind matrices
+	std::vector<glm::mat4> ibm(jointCount, glm::mat4(1.0f));
+	if (skin.inverse_bind_matrices >= 0)
+	{
+		size_t stride = 0, count = 0;
+		const unsigned char* data = GetAccessorData(model, skin.inverse_bind_matrices, stride, count);
+		if (data)
+		{
+			for (size_t i = 0; i < std::min<size_t>(count, jointCount); ++i)
+				std::memcpy(&ibm[i], data + i * stride, sizeof(glm::mat4));
+		}
+	}
+
+	skel.joints.resize(jointCount);
+	for (uint32_t j = 0; j < jointCount; ++j)
+	{
+		const int nodeIdx = skin.joints[j];
+		const tg3_node& node = model.nodes[nodeIdx];
+		Joint& joint = skel.joints[j];
+
+		joint.name.assign((const char*)node.name.data, node.name.len);
+		joint.inverseBind = ibm[j];
+		NodeLocalMatrix(node, joint.restT, joint.restR, joint.restS);
+
+		const int parentNode = nodeParent[nodeIdx];
+		joint.parent = (parentNode >= 0) ? nodeToJoint[parentNode] : -1;
+
+		// If the parent isn't a joint (e.g. "Armature" with a 0.01 scale), bake its
+		// accumulated transform so root joints still end up in the right space.
+		if (joint.parent < 0)
+		{
+			glm::mat4 acc(1.0f);
+			glm::vec3 t, s; glm::quat r;
+			for (int n = parentNode; n >= 0; n = nodeParent[n])
+				acc = NodeLocalMatrix(model.nodes[n], t, r, s) * acc;
+			joint.parentGlobal = acc;
+		}
+	}
+
+	// Parents before children evaluation order
+	std::vector<char> visited(jointCount, 0);
+	skel.order.reserve(jointCount);
+	std::function<void(int)> visit = [&](int j)
+		{
+			if (visited[j]) return;
+			visited[j] = 1;
+			if (skel.joints[j].parent >= 0) visit(skel.joints[j].parent);
+			skel.order.push_back(j);
+		};
+	for (int j = 0; j < (int)jointCount; ++j) visit(j);
+
+	std::cout << "Skeleton: " << jointCount << " joints\n";
+	for (uint32_t j = 0; j < jointCount; ++j)
+		std::cout << "  joint " << j << ": " << skel.joints[j].name << " parent=" << skel.joints[j].parent << '\n';
+
+	return skel;
+}
+
 static Model LoadModel(const std::string& filePath, const FallbackTextures& fallbacks)
 {
 	Model result;
@@ -385,6 +546,8 @@ static Model LoadModel(const std::string& filePath, const FallbackTextures& fall
 			int texCoordAccessor = -1;
 			int normalAccessor = -1;
 			int tangentAccessor = -1;
+			int jointsAccessor = -1;
+			int weightsAccessor = -1;
 			for (uint32_t a = 0; a < prim.attributes_count; ++a)
 			{
 				const tg3_str_int_pair& attr = prim.attributes[a];
@@ -392,6 +555,8 @@ static Model LoadModel(const std::string& filePath, const FallbackTextures& fall
 				else if (tg3_str_equals_cstr(attr.key, "TEXCOORD_0")) texCoordAccessor = attr.value;
 				else if (tg3_str_equals_cstr(attr.key, "NORMAL")) normalAccessor = attr.value;
 				else if (tg3_str_equals_cstr(attr.key, "TANGENT")) tangentAccessor = attr.value;
+				else if (tg3_str_equals_cstr(attr.key, "JOINTS_0")) jointsAccessor = attr.value;
+				else if (tg3_str_equals_cstr(attr.key, "WEIGHTS_0")) weightsAccessor = attr.value;
 			}
 
 			if (positionAccessor < 0)
@@ -429,6 +594,22 @@ static Model LoadModel(const std::string& filePath, const FallbackTextures& fall
 			if (tangentAccessor >= 0)
 			{
 				tangentData = GetAccessorData(model, tangentAccessor, tangentStride, tangentCount);
+			}
+
+			// joints
+			const unsigned char* jointsData = nullptr;
+			size_t jointsStride = 0, jointsCount = 0;
+			if (jointsAccessor >= 0)
+			{
+				jointsData = GetAccessorData(model, jointsAccessor, jointsStride, jointsCount);
+			}
+
+			// weights
+			const unsigned char* weightsData = nullptr;
+			size_t weightsStride = 0, weightsCount = 0;
+			if (weightsAccessor >= 0)
+			{
+				weightsData = GetAccessorData(model, weightsAccessor, weightsStride, weightsCount);
 			}
 
 			std::vector<Vertex> vertices(posCount);
@@ -469,6 +650,42 @@ static Model LoadModel(const std::string& filePath, const FallbackTextures& fall
 				else
 				{
 					vertices[i].tangent = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
+				}
+
+				if (jointsData)
+				{
+					const int compType = model.accessors[jointsAccessor].component_type;
+					const unsigned char* p = jointsData + i * jointsStride;
+					if (compType == TG3_COMPONENT_TYPE_UNSIGNED_BYTE)
+					{
+						vertices[i].joints = glm::uvec4(p[0], p[1], p[2], p[3]);
+					}
+					else // UNSIGNED_SHORT
+					{
+						uint16_t j[4];
+						std::memcpy(j, p, sizeof(j));
+						vertices[i].joints = glm::uvec4(j[0], j[1], j[2], j[3]);
+					}
+				}
+
+				if (weightsData)
+				{
+					const tg3_accessor& wa = model.accessors[weightsAccessor];
+					const unsigned char* p = weightsData + i * weightsStride;
+					if (wa.component_type == TG3_COMPONENT_TYPE_FLOAT)
+					{
+						std::memcpy(&vertices[i].weights, p, sizeof(glm::vec4));
+					}
+					else if (wa.component_type == TG3_COMPONENT_TYPE_UNSIGNED_BYTE) // normalized
+					{
+						vertices[i].weights = glm::vec4(p[0], p[1], p[2], p[3]) / 255.0f;
+					}
+					else // normalized u16
+					{
+						uint16_t w[4];
+						std::memcpy(w, p, sizeof(w));
+						vertices[i].weights = glm::vec4(w[0], w[1], w[2], w[3]) / 65535.0f;
+					}
 				}
 			}
 
@@ -539,6 +756,14 @@ static Model LoadModel(const std::string& filePath, const FallbackTextures& fall
 			glVertexArrayAttribFormat(gpuPrim.VAO, 3, 4, GL_FLOAT, GL_FALSE, offsetof(Vertex, tangent));
 			glVertexArrayAttribBinding(gpuPrim.VAO, 3, 0);
 
+			glEnableVertexArrayAttrib(gpuPrim.VAO, 4);
+			glVertexArrayAttribIFormat(gpuPrim.VAO, 4, 4, GL_UNSIGNED_INT, offsetof(Vertex, joints));
+			glVertexArrayAttribBinding(gpuPrim.VAO, 4, 0);
+
+			glEnableVertexArrayAttrib(gpuPrim.VAO, 5);
+			glVertexArrayAttribFormat(gpuPrim.VAO, 5, 4, GL_FLOAT, GL_FALSE, offsetof(Vertex, weights));
+			glVertexArrayAttribBinding(gpuPrim.VAO, 5, 0);
+
 			// Resolve base color texture through material -> texture -> image.
 			if (prim.material >= 0 && (uint32_t)prim.material < model.materials_count)
 			{
@@ -565,13 +790,331 @@ static Model LoadModel(const std::string& filePath, const FallbackTextures& fall
 			result.primitives.push_back(gpuPrim);
 		}
 	}
-	tg3_model_free(&model);
 
+	result.skeleton = BuildSkeleton(model);
 	result.textureIds = std::move(imageTexIds);
 	result.textureHandles = std::move(imageHandles);
 
+	tg3_model_free(&model);
+
 	return result;
 }
+
+// Reads any accessor into a flat float array, handling normalized integer types.
+static bool ReadAccessorFloats(const tg3_model& model, int idx, std::vector<float>& out, int& comps)
+{
+	if (idx < 0 || idx >= (int)model.accessors_count) return false;
+	const tg3_accessor& acc = model.accessors[idx];
+	comps = tg3_num_components(acc.type);
+	const int csize = tg3_component_size(acc.component_type);
+
+	size_t stride = 0, count = 0;
+	const unsigned char* data = GetAccessorData(model, idx, stride, count);
+	if (!data || comps <= 0 || csize <= 0) return false;
+
+	out.resize(count * comps);
+	for (size_t i = 0; i < count; ++i)
+	{
+		for (int c = 0; c < comps; ++c)
+		{
+			const unsigned char* p = data + i * stride + c * csize;
+			float v = 0.0f;
+			switch (acc.component_type)
+			{
+			case TG3_COMPONENT_TYPE_FLOAT: std::memcpy(&v, p, 4); break;
+			case TG3_COMPONENT_TYPE_UNSIGNED_BYTE: v = *p / (acc.normalized ? 255.0f : 1.0f); break;
+			case TG3_COMPONENT_TYPE_BYTE: { int8_t x; std::memcpy(&x, p, 1); v = acc.normalized ? std::max(x / 127.0f, -1.0f) : (float)x; } break;
+			case TG3_COMPONENT_TYPE_UNSIGNED_SHORT: { uint16_t x; std::memcpy(&x, p, 2); v = acc.normalized ? x / 65535.0f : (float)x; } break;
+			case TG3_COMPONENT_TYPE_SHORT: { int16_t x; std::memcpy(&x, p, 2); v = acc.normalized ? std::max(x / 32767.0f, -1.0f) : (float)x; } break;
+			default: return false;
+			}
+			out[i * comps + c] = v;
+		}
+	}
+	return true;
+}
+
+static std::string ToString(const tg3_str& s)
+{
+	return (s.data && s.len) ? std::string(s.data, s.len) : std::string();
+}
+
+static std::vector<AnimationClip> LoadAnimations(const std::string& filePath)
+{
+	std::vector<AnimationClip> clips;
+
+	if (!std::filesystem::exists(filePath))
+	{
+		std::cerr << "Animation file does not exist: " << filePath << std::endl;
+		return clips;
+	}
+
+	tg3_model model;
+	tg3_parse_options opts;
+	tg3_error_stack errors;
+	tg3_parse_options_init(&opts);
+	opts.images_as_is = 1;
+	tg3_error_stack_init(&errors);
+
+	if (tg3_parse_file(&model, &errors, filePath.c_str(), (uint32_t)filePath.size(), &opts) != TG3_OK)
+	{
+		for (uint32_t i = 0; i < errors.count; ++i) std::cerr << errors.entries[i].message << std::endl;
+		tg3_error_stack_free(&errors);
+		return clips;
+	}
+	tg3_error_stack_free(&errors);
+
+	for (uint32_t a = 0; a < model.animations_count; ++a)
+	{
+		const tg3_animation& anim = model.animations[a];
+
+		AnimationClip clip;
+		clip.name = ToString(anim.name);
+		if (clip.name.empty()) clip.name = "animation_" + std::to_string(a);
+
+		int skipped = 0;
+		for (uint32_t c = 0; c < anim.channels_count; ++c)
+		{
+			const tg3_animation_channel& ch = anim.channels[c];
+			if (ch.target.node < 0 || (uint32_t)ch.target.node >= model.nodes_count || ch.sampler < 0 || (uint32_t)ch.sampler >= anim.samplers_count)
+			{
+				++skipped;
+				continue;
+			}
+
+			Channel out;
+			int expectedComps;
+			if (tg3_str_equals_cstr(ch.target.path, "translation")) { out.path = Channel::Translation; expectedComps = 3; }
+			else if (tg3_str_equals_cstr(ch.target.path, "rotation")) { out.path = Channel::Rotation; expectedComps = 4; }
+			else if (tg3_str_equals_cstr(ch.target.path, "scale")) { out.path = Channel::Scale; expectedComps = 3; }
+			else { ++skipped; continue; }   // "weights" (morph targets) not supported yet
+
+			out.targetNode = ch.target.node;
+			out.targetName = ToString(model.nodes[ch.target.node].name);
+
+			const tg3_animation_sampler& smp = anim.samplers[ch.sampler];
+			if (tg3_str_equals_cstr(smp.interpolation, "STEP")) { out.interp = Channel::Step; }
+			else if (tg3_str_equals_cstr(smp.interpolation, "CUBICSPLINE")) { out.interp = Channel::CubicSpline; }
+
+			std::vector<float> t, v;
+			int tc = 0, vc = 0;
+			if (!ReadAccessorFloats(model, smp.input, t, tc) || !ReadAccessorFloats(model, smp.output, v, vc) || t.empty() || vc != expectedComps)
+			{
+				++skipped;
+				continue;
+			}
+
+			// Cubic Spline output is (in-tangent, value, out-tangent) per key; the others are one value per key.
+			const bool cubic = (out.interp == Channel::CubicSpline);
+			const size_t perKey = cubic ? 3 : 1;
+			if (v.size() < t.size() * perKey * vc) { ++skipped; continue; }
+
+			auto read = [&](size_t idx) {
+				const float* p = &v[idx * vc];
+				return glm::vec4(p[0], p[1], p[2], vc == 4 ? p[3] : 0.0f);
+				};
+
+			out.times = std::move(t);
+			out.values.resize(out.times.size());
+			if (cubic)
+			{
+				out.inTangents.resize(out.times.size());
+				out.outTangents.resize(out.times.size());
+			}
+			for (size_t k = 0; k < out.times.size(); ++k)
+			{
+				if (cubic)
+				{
+					out.inTangents[k] = read(k * 3 + 0);
+					out.values[k] = read(k * 3 + 1);
+					out.outTangents[k] = read(k * 3 + 2);
+				}
+				else
+				{
+					out.values[k] = read(k);
+				}
+			}
+
+			clip.duration = std::max(clip.duration, out.times.back());
+			clip.channels.push_back(std::move(out));
+		}
+
+		std::cout << "Animation '" << clip.name << "': " << clip.channels.size() << " channels, " << clip.duration << "s";
+		if (skipped) std::cout << " (" << skipped << " channels skipped)";
+		std::cout << '\n';
+
+		clips.push_back(std::move(clip));
+	}
+
+	tg3_model_free(&model);
+	return clips;
+}
+
+// Animation Playback
+// Resolves each channel's target name to a joint index. Exact-name matching
+static std::vector<int> BindClip(const AnimationClip& clip, const Skeleton& skel)
+{
+	std::unordered_map<std::string, int> byName;
+	for (int i = 0; i < (int)skel.joints.size(); ++i) byName.emplace(skel.joints[i].name, i);
+
+	std::vector<int> binding(clip.channels.size(), -1);
+	int unmatched = 0;
+	for (size_t c = 0; c < clip.channels.size(); ++c)
+	{
+		auto it = byName.find(clip.channels[c].targetName);
+		if (it != byName.end()) binding[c] = it->second;
+		else ++unmatched;
+	}
+	if (unmatched)
+	{
+		std::cerr << "BindClip '" << clip.name << "': " << unmatched << " of " << clip.channels.size() << " channels have no matching joint\n";
+	}
+	return binding;
+}
+
+static glm::vec4 SampleChannel(const Channel& ch, float t)
+{
+	const auto& ts = ch.times;
+	if (ts.size() == 1 || t <= ts.front()) return ch.values.front();
+	if (t >= ts.back())                    return ch.values.back();
+
+	const size_t i1 = std::upper_bound(ts.begin(), ts.end(), t) - ts.begin();
+	const size_t i0 = i1 - 1;
+	const float  dt = ts[i1] - ts[i0];
+	const float  s = (t - ts[i0]) / dt;
+	const glm::vec4 v0 = ch.values[i0];
+	const glm::vec4 v1 = ch.values[i1];
+	const bool isRot = (ch.path == Channel::Rotation);
+
+	switch (ch.interp)
+	{
+	case Channel::Step:
+		return v0;
+
+	case Channel::CubicSpline:
+	{
+		const glm::vec4 m0 = ch.outTangents[i0] * dt;
+		const glm::vec4 m1 = ch.inTangents[i1] * dt;
+		const float s2 = s * s, s3 = s2 * s;
+		glm::vec4 r = (2 * s3 - 3 * s2 + 1) * v0 + (s3 - 2 * s2 + s) * m0
+			+ (-2 * s3 + 3 * s2) * v1 + (s3 - s2) * m1;
+		return isRot ? glm::normalize(r) : r;
+	}
+
+	default: // Linear
+		if (isRot)
+		{
+			glm::quat q = glm::slerp(glm::quat(v0.w, v0.x, v0.y, v0.z), glm::quat(v1.w, v1.x, v1.y, v1.z), s);
+			return glm::vec4(q.x, q.y, q.z, q.w);
+		}
+		return glm::mix(v0, v1, s);
+	}
+}
+
+// Fills out skin with one skinning matrix per joint (indexed like JOINTS_0).
+static void EvaluatePose(const Skeleton& skel, const AnimationClip& clip, const std::vector<int>& binding, float time, std::vector<glm::mat4>& outSkin)
+{
+	const size_t n = skel.joints.size();
+	std::vector<glm::vec3> T(n), S(n);
+	std::vector<glm::quat> R(n);
+	for (size_t i = 0; i < n; ++i) { T[i] = skel.joints[i].restT; R[i] = skel.joints[i].restR; S[i] = skel.joints[i].restS; }
+
+	for (size_t c = 0; c < clip.channels.size() && c < binding.size(); ++c)
+	{
+		const int j = binding[c];
+		if (j < 0) continue;
+		const Channel& ch = clip.channels[c];
+		const glm::vec4 v = SampleChannel(ch, time);
+		switch (ch.path)
+		{
+		case Channel::Translation: T[j] = glm::vec3(v); break;
+		case Channel::Rotation:    R[j] = glm::quat(v.w, v.x, v.y, v.z); break;
+		case Channel::Scale:       S[j] = glm::vec3(v); break;
+		}
+	}
+
+	std::vector<glm::mat4> global(n);
+	outSkin.resize(n);
+	for (int j : skel.order)
+	{
+		const Joint& joint = skel.joints[j];
+		const glm::mat4 local = glm::translate(glm::mat4(1.0f), T[j]) * glm::mat4_cast(glm::normalize(R[j])) * glm::scale(glm::mat4(1.0f), S[j]);
+		const glm::mat4& parent = (joint.parent >= 0) ? global[joint.parent] : joint.parentGlobal;
+		global[j] = parent * local;
+		outSkin[j] = global[j] * joint.inverseBind;
+	}
+}
+
+static void PrintBindPoseError(const Skeleton& skel)
+{
+	std::vector<glm::mat4> skin;
+	EvaluatePose(skel, AnimationClip{}, {}, 0.0f, skin);
+
+	float maxErr = 0.0f;
+	int worst = -1;
+	for (size_t j = 0; j < skin.size(); ++j)
+	{
+		for (int c = 0; c < 4; ++c)
+		{
+			for (int r = 0; r < 4; ++r)
+			{
+				const float err = std::abs(skin[j][c][r] - (c == r ? 1.0f : 0.0f));
+				if (err > maxErr) { maxErr = err; worst = (int)j; }
+			}
+		}
+	}
+	std::cout << "Bind pose max error: " << maxErr;
+	if (worst >= 0) std::cout << " (joint " << worst << " '" << skel.joints[worst].name << "')";
+	std::cout << '\n';
+}
+
+struct AnimationPlayer
+{
+	const AnimationClip* clip = nullptr;
+	std::vector<int> binding;
+	float time = 0.0f;
+	float speed = 1.0f;
+	bool  loop = true;
+
+	std::vector<glm::mat4> skin;
+	GLuint boneSSBO = 0;
+
+	void Init(const Skeleton& skel)
+	{
+		skin.assign(skel.joints.size(), glm::mat4(1.0f));
+		// Always allocate at least one mat4 so the buffer is valid for static models.
+		const size_t bytes = std::max<size_t>(skin.size(), 1) * sizeof(glm::mat4);
+		glCreateBuffers(1, &boneSSBO);
+		glNamedBufferStorage(boneSSBO, bytes, nullptr, GL_DYNAMIC_STORAGE_BIT);
+	}
+
+	void Play(const AnimationClip& c, const Skeleton& skel)
+	{
+		clip = &c;
+		binding = BindClip(c, skel);
+		time = 0.0f;
+	}
+
+	void Update(float dt, const Skeleton& skel)
+	{
+		if (skin.empty()) return;
+
+		static const AnimationClip emptyClip;
+		if (clip && clip->duration > 0.0f)
+		{
+			time += dt * speed;
+			time = loop ? std::fmod(time, clip->duration) : std::min(time, clip->duration);
+		}
+		EvaluatePose(skel, clip ? *clip : emptyClip, binding, time, skin);
+		glNamedBufferSubData(boneSSBO, 0, skin.size() * sizeof(glm::mat4), skin.data());
+	}
+
+	void Destroy()
+	{
+		if (boneSSBO) { glDeleteBuffers(1, &boneSSBO); }
+		boneSSBO = 0;
+	}
+};
 
 int main()
 {
@@ -624,7 +1167,27 @@ int main()
 	glNamedBufferStorage(SSBO, sizeof(FrameData), nullptr, GL_DYNAMIC_STORAGE_BIT);
 	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, SSBO);
 
-	Model skinnedMesh = LoadModel("../../../resources/models/bot.glb", defaultTextures);
+	Model skinnedMesh = LoadModel("../../../resources/models/adventurer.glb", defaultTextures);
+	//auto anims = LoadAnimations("../../../resources/animations/taunt.glb");
+	auto anims = LoadAnimations("../../../resources/animations/adventurer.glb");
+
+
+	// Skinning setup. Static models leave uSkinned at 0 and ignore the bone buffer.
+	glProgramUniform1i(shaderProgram, glGetUniformLocation(shaderProgram, "uSkinned"), skinnedMesh.skeleton.joints.empty() ? 0 : 1);
+	PrintBindPoseError(skinnedMesh.skeleton);
+
+	AnimationPlayer player;
+	player.Init(skinnedMesh.skeleton);
+	if (!anims.empty())
+	{
+		player.Play(anims[0], skinnedMesh.skeleton);
+	}
+	else
+	{
+		std::cerr << "No animations loaded, showing bind pose\n";
+	}
+
+	float lastTime = (float)glfwGetTime();
 
 	while (!glfwWindowShouldClose(window))
 	{
@@ -637,9 +1200,15 @@ int main()
 		}
 
 		float time = (float)glfwGetTime();
+		float deltaTime = time - lastTime;
+		lastTime = time;
+
+		player.Update(deltaTime, skinnedMesh.skeleton);
+		glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, player.boneSSBO);
 
 		// MVP
 		glm::mat4 model = glm::rotate(glm::mat4(1.0f), time * glm::radians(50.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+		model = glm::scale(model, glm::vec3(1.0f, 1.0f, 1.0f));
 		glm::mat4 view = glm::lookAt(glm::vec3(0.0f, 1.5f, 2.5f), glm::vec3(0.0f, 1.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
 		glm::mat4 projection = glm::perspective(glm::radians(60.0f), (float)sWidth / (float)sHeight, 0.1f, 100.0f);
 
@@ -687,6 +1256,7 @@ int main()
 
 	defaultTextures.Cleanup();
 
+	player.Destroy();
 	glDeleteBuffers(1, &SSBO);
 	glDeleteProgram(shaderProgram);
 	glfwDestroyWindow(window);
