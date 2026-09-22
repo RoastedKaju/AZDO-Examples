@@ -213,7 +213,7 @@ int main()
 	glCreateBuffers(1, &UBO);
 	glNamedBufferStorage(UBO, sizeof(glm::mat4), nullptr, GL_DYNAMIC_STORAGE_BIT);
 	glBindBufferBase(GL_UNIFORM_BUFFER, 0, UBO);
-	// Use bind range becomes useful when one large buffer contains multiple objects' data.
+	// Using bind range becomes useful when one large buffer contains multiple objects' data.
 	// Binding base will make shader accesses the whole buffer starting at offset 0.
 	//glBindBufferRange(GL_UNIFORM_BUFFER, 0, UBO, 0, sizeof(glm::mat4));
 	

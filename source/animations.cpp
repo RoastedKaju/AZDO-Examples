@@ -16,6 +16,9 @@
 #include <string>
 #include <functional>
 #include <algorithm>
+#include <unordered_map>
+#include <cstring>
+#include <cmath>
 
 static int sWidth = 800;
 static int sHeight = 600;
@@ -49,14 +52,17 @@ layout (std430, binding = 1) readonly buffer Bones {
 	mat4 bones[];
 };
 
-uniform int uSkinned;
+uniform int uSkinned;   // 0 for static meshes, 1 for skinned
 
 void main() {
 	vTexCoord = aTexCoord;
 
 	vec4 pos = vec4(aPos, 1.0);
 	if (uSkinned != 0) {
-		mat4 skin = aWeights.x * bones[aJoints.x] + aWeights.y * bones[aJoints.y] + aWeights.z * bones[aJoints.z] + aWeights.w * bones[aJoints.w];
+		mat4 skin = aWeights.x * bones[aJoints.x]
+		          + aWeights.y * bones[aJoints.y]
+		          + aWeights.z * bones[aJoints.z]
+		          + aWeights.w * bones[aJoints.w];
 		pos = skin * pos;
 	}
 	gl_Position = frameData.proj * frameData.view * frameData.model * pos;
@@ -180,13 +186,14 @@ struct Primitive
 	GLuint64 occlusionHandle = 0;
 	GLuint64 emissiveHandle = 0;
 	glm::vec4 baseColorFactor = glm::vec4(1.0f);
+	bool skinned = false;   // true: drawn with bone matrices; false: node transform is baked into the vertices
 };
 
 struct Joint
 {
 	std::string name;
 	int parent = -1;
-	glm::mat4 inverseBind{ 1.0f };
+	int node = -1;                   // node index in the source file
 	glm::vec3 restT{ 0.0f };
 	glm::quat restR{ 1.0f, 0.0f, 0.0f, 0.0f };
 	glm::vec3 restS{ 1.0f };
@@ -199,12 +206,24 @@ struct Skeleton
 	std::vector<int> order;
 };
 
+// One per skinned mesh. Every glTF skin has its own joint order and its own inverse bind
+// matrices (exporters fold the mesh object's own transform into them), so a skin can't be
+// borrowed by another mesh. The bone buffer is the concatenation of all bone sets.
+struct BoneSet
+{
+	int base = 0;                        // offset into the bone buffer; also added to JOINTS_0 at load time
+	std::vector<int> joint;              // joint[i] = unified Skeleton joint for this skin's i-th joint
+	std::vector<glm::mat4> inverseBind;  // this skin's inverse bind matrices
+};
+
 struct Model
 {
 	std::vector<Primitive> primitives;
 	std::vector<GLuint> textureIds;
 	std::vector<GLuint64> textureHandles;
-	Skeleton skeleton;
+	Skeleton skeleton;                   // union of the joints of all skins
+	std::vector<BoneSet> boneSets;
+	int boneCount = 0;                   // total mat4s in the bone buffer
 };
 
 // Animation structs
@@ -362,6 +381,12 @@ static const unsigned char* GetAccessorData(const tg3_model& model, int accessor
 	return buffer.data.data + view.byte_offset + accessor.byte_offset;
 }
 
+// Skeleton builder
+static std::string ToString(const tg3_str& s)
+{
+	return (s.data && s.len) ? std::string(s.data, s.len) : std::string();
+}
+
 static glm::mat4 NodeLocalMatrix(const tg3_node& n, glm::vec3& t, glm::quat& r, glm::vec3& s)
 {
 	if (n.has_matrix)
@@ -379,69 +404,71 @@ static glm::mat4 NodeLocalMatrix(const tg3_node& n, glm::vec3& t, glm::quat& r, 
 	return glm::translate(glm::mat4(1.0f), t) * glm::mat4_cast(glm::normalize(r)) * glm::scale(glm::mat4(1.0f), s);
 }
 
-static Skeleton BuildSkeleton(const tg3_model& model)
+static std::vector<int> ComputeNodeParents(const tg3_model& model)
 {
-	Skeleton skel;
-	if (model.skins_count == 0) return skel;
-
-	const tg3_skin& skin = model.skins[0]; // assumes one skin
-	const uint32_t jointCount = skin.joints_count;
-
-	if (model.skins_count > 1)
-	{
-		std::cerr << "Warning: " << model.skins_count << " skins found, only using skin 0\n";
-	}
-
-	// node -> parent node, node -> joint index
-	std::vector<int> nodeParent(model.nodes_count, -1);
+	std::vector<int> parent(model.nodes_count, -1);
 	for (uint32_t n = 0; n < model.nodes_count; ++n)
 		for (uint32_t c = 0; c < model.nodes[n].children_count; ++c)
-			nodeParent[model.nodes[n].children[c]] = (int)n;
+			if (model.nodes[n].children[c] >= 0 && (uint32_t)model.nodes[n].children[c] < model.nodes_count)
+				parent[model.nodes[n].children[c]] = (int)n;
+	return parent;
+}
 
+// Global (rest pose) transform of every node.
+static std::vector<glm::mat4> ComputeNodeGlobals(const tg3_model& model)
+{
+	const std::vector<int> parent = ComputeNodeParents(model);
+	std::vector<glm::mat4> global(model.nodes_count, glm::mat4(1.0f));
+	std::vector<char> done(model.nodes_count, 0);
+
+	std::function<const glm::mat4& (int)> eval = [&](int n) -> const glm::mat4&
+		{
+			if (!done[n])
+			{
+				done[n] = 1;   // set first so a malformed cycle can't recurse forever
+				glm::vec3 t, s; glm::quat r;
+				const glm::mat4 local = NodeLocalMatrix(model.nodes[n], t, r, s);
+				global[n] = (parent[n] >= 0) ? eval(parent[n]) * local : local;
+			}
+			return global[n];
+		};
+	for (int n = 0; n < (int)model.nodes_count; ++n) eval(n);
+	return global;
+}
+
+// One skeleton for the whole file: the union of every skin's joints, keyed by node.
+static Skeleton BuildSkeleton(const tg3_model& model, const std::vector<glm::mat4>& nodeGlobal)
+{
+	Skeleton skel;
+	const std::vector<int> nodeParent = ComputeNodeParents(model);
 	std::vector<int> nodeToJoint(model.nodes_count, -1);
-	for (uint32_t j = 0; j < jointCount; ++j)
-		nodeToJoint[skin.joints[j]] = (int)j;
 
-	// Inverse bind matrices
-	std::vector<glm::mat4> ibm(jointCount, glm::mat4(1.0f));
-	if (skin.inverse_bind_matrices >= 0)
+	for (uint32_t s = 0; s < model.skins_count; ++s)
 	{
-		size_t stride = 0, count = 0;
-		const unsigned char* data = GetAccessorData(model, skin.inverse_bind_matrices, stride, count);
-		if (data)
+		for (uint32_t j = 0; j < model.skins[s].joints_count; ++j)
 		{
-			for (size_t i = 0; i < std::min<size_t>(count, jointCount); ++i)
-				std::memcpy(&ibm[i], data + i * stride, sizeof(glm::mat4));
+			const int node = model.skins[s].joints[j];
+			if (node < 0 || (uint32_t)node >= model.nodes_count || nodeToJoint[node] >= 0) continue;
+
+			nodeToJoint[node] = (int)skel.joints.size();
+			Joint joint;
+			joint.node = node;
+			joint.name = ToString(model.nodes[node].name);
+			NodeLocalMatrix(model.nodes[node], joint.restT, joint.restR, joint.restS);
+			skel.joints.push_back(std::move(joint));
 		}
 	}
 
-	skel.joints.resize(jointCount);
-	for (uint32_t j = 0; j < jointCount; ++j)
+	for (Joint& joint : skel.joints)
 	{
-		const int nodeIdx = skin.joints[j];
-		const tg3_node& node = model.nodes[nodeIdx];
-		Joint& joint = skel.joints[j];
-
-		joint.name.assign((const char*)node.name.data, node.name.len);
-		joint.inverseBind = ibm[j];
-		NodeLocalMatrix(node, joint.restT, joint.restR, joint.restS);
-
-		const int parentNode = nodeParent[nodeIdx];
+		const int parentNode = nodeParent[joint.node];
 		joint.parent = (parentNode >= 0) ? nodeToJoint[parentNode] : -1;
-
-		// If the parent isn't a joint (e.g. "Armature" with a 0.01 scale), bake its
-		// accumulated transform so root joints still end up in the right space.
-		if (joint.parent < 0)
-		{
-			glm::mat4 acc(1.0f);
-			glm::vec3 t, s; glm::quat r;
-			for (int n = parentNode; n >= 0; n = nodeParent[n])
-				acc = NodeLocalMatrix(model.nodes[n], t, r, s) * acc;
-			joint.parentGlobal = acc;
-		}
+		// Parent isn't a joint (e.g. an "Armature" node): bake its transform for root joints.
+		if (joint.parent < 0 && parentNode >= 0) joint.parentGlobal = nodeGlobal[parentNode];
 	}
 
-	// Parents before children evaluation order
+	// Parents-before-children evaluation order
+	const int jointCount = (int)skel.joints.size();
 	std::vector<char> visited(jointCount, 0);
 	skel.order.reserve(jointCount);
 	std::function<void(int)> visit = [&](int j)
@@ -451,13 +478,42 @@ static Skeleton BuildSkeleton(const tg3_model& model)
 			if (skel.joints[j].parent >= 0) visit(skel.joints[j].parent);
 			skel.order.push_back(j);
 		};
-	for (int j = 0; j < (int)jointCount; ++j) visit(j);
+	for (int j = 0; j < jointCount; ++j) visit(j);
 
-	std::cout << "Skeleton: " << jointCount << " joints\n";
-	for (uint32_t j = 0; j < jointCount; ++j)
-		std::cout << "  joint " << j << ": " << skel.joints[j].name << " parent=" << skel.joints[j].parent << '\n';
-
+	std::cout << "Skeleton: " << jointCount << " joints from " << model.skins_count << " skin(s)\n";
 	return skel;
+}
+
+// Maps one skin onto the unified skeleton and reads that skin's own inverse bind matrices.
+static BoneSet BuildBoneSet(const tg3_model& model, int skinIdx, const Skeleton& skel, int base)
+{
+	BoneSet set;
+	set.base = base;
+
+	const tg3_skin& skin = model.skins[skinIdx];
+
+	std::unordered_map<int, int> nodeToJoint;
+	for (int i = 0; i < (int)skel.joints.size(); ++i) nodeToJoint.emplace(skel.joints[i].node, i);
+
+	set.joint.assign(skin.joints_count, 0);
+	for (uint32_t j = 0; j < skin.joints_count; ++j)
+	{
+		auto it = nodeToJoint.find(skin.joints[j]);
+		if (it != nodeToJoint.end()) set.joint[j] = it->second;
+	}
+
+	set.inverseBind.assign(skin.joints_count, glm::mat4(1.0f));
+	if (skin.inverse_bind_matrices >= 0)
+	{
+		size_t stride = 0, count = 0;
+		const unsigned char* data = GetAccessorData(model, skin.inverse_bind_matrices, stride, count);
+		if (data)
+		{
+			for (size_t i = 0; i < std::min<size_t>(count, skin.joints_count); ++i)
+				std::memcpy(&set.inverseBind[i], data + i * stride, sizeof(glm::mat4));
+		}
+	}
+	return set;
 }
 
 static Model LoadModel(const std::string& filePath, const FallbackTextures& fallbacks)
@@ -533,10 +589,35 @@ static Model LoadModel(const std::string& filePath, const FallbackTextures& fall
 		}
 	}
 
+	// One unified skeleton for all skins, plus one bone set per skinned mesh.
+	const std::vector<glm::mat4> nodeGlobal = ComputeNodeGlobals(model);
+	result.skeleton = BuildSkeleton(model, nodeGlobal);
+
+	std::vector<int> meshNode(model.meshes_count, -1);   // first node that instances each mesh
+	for (uint32_t n = 0; n < model.nodes_count; ++n)
+	{
+		const int32_t mi = model.nodes[n].mesh;
+		if (mi >= 0 && (uint32_t)mi < model.meshes_count && meshNode[mi] < 0) meshNode[mi] = (int)n;
+	}
+
+	std::vector<int> meshBoneSet(model.meshes_count, -1);
+	for (uint32_t mi = 0; mi < model.meshes_count; ++mi)
+	{
+		const int n = meshNode[mi];
+		if (n < 0 || model.nodes[n].skin < 0 || (uint32_t)model.nodes[n].skin >= model.skins_count) continue;
+		meshBoneSet[mi] = (int)result.boneSets.size();
+		result.boneSets.push_back(BuildBoneSet(model, model.nodes[n].skin, result.skeleton, result.boneCount));
+		result.boneCount += (int)result.boneSets.back().joint.size();
+	}
+	std::cout << "Bone sets: " << result.boneSets.size() << " (" << result.boneCount << " bones total)\n";
+
 	// Walk every mesh primitive, upload its vertex/index data
 	for (uint32_t m = 0; m < model.meshes_count; ++m)
 	{
 		const tg3_mesh& mesh = model.meshes[m];
+		const int boneSetIdx = meshBoneSet[m];
+		const int boneBase = (boneSetIdx >= 0) ? result.boneSets[boneSetIdx].base : 0;
+		const glm::mat4 meshGlobal = (meshNode[m] >= 0) ? nodeGlobal[meshNode[m]] : glm::mat4(1.0f);
 
 		for (uint32_t p = 0; p < mesh.primitives_count; ++p)
 		{
@@ -689,6 +770,24 @@ static Model LoadModel(const std::string& filePath, const FallbackTextures& fall
 				}
 			}
 
+			// Skinned: point JOINTS_0 at this mesh's slice of the bone buffer (the shader is unchanged).
+			// Static: a skinned mesh ignores its node transform, but a static one needs it, so bake it in.
+			const bool primSkinned = (boneSetIdx >= 0 && jointsData && weightsData);
+			if (primSkinned)
+			{
+				for (Vertex& v : vertices) v.joints += glm::uvec4((uint32_t)boneBase);
+			}
+			else
+			{
+				const glm::mat3 normalMat = glm::mat3(glm::transpose(glm::inverse(meshGlobal)));
+				for (Vertex& v : vertices)
+				{
+					v.position = glm::vec3(meshGlobal * glm::vec4(v.position, 1.0f));
+					if (glm::dot(v.normal, v.normal) > 0.0f) v.normal = glm::normalize(normalMat * v.normal);
+					v.tangent = glm::vec4(glm::normalize(glm::mat3(meshGlobal) * glm::vec3(v.tangent)), v.tangent.w);
+				}
+			}
+
 			// Indices - component type can vary (u8/u16/u32), normalize to u32.
 			std::vector<uint32_t> indices;
 			if (prim.indices >= 0)
@@ -729,6 +828,7 @@ static Model LoadModel(const std::string& filePath, const FallbackTextures& fall
 
 			Primitive gpuPrim;
 			gpuPrim.indexCount = (GLsizei)indices.size();
+			gpuPrim.skinned = primSkinned;
 
 			glCreateVertexArrays(1, &gpuPrim.VAO);
 			glCreateBuffers(1, &gpuPrim.VBO);
@@ -791,7 +891,6 @@ static Model LoadModel(const std::string& filePath, const FallbackTextures& fall
 		}
 	}
 
-	result.skeleton = BuildSkeleton(model);
 	result.textureIds = std::move(imageTexIds);
 	result.textureHandles = std::move(imageHandles);
 
@@ -832,11 +931,6 @@ static bool ReadAccessorFloats(const tg3_model& model, int idx, std::vector<floa
 		}
 	}
 	return true;
-}
-
-static std::string ToString(const tg3_str& s)
-{
-	return (s.data && s.len) ? std::string(s.data, s.len) : std::string();
 }
 
 static std::vector<AnimationClip> LoadAnimations(const std::string& filePath)
@@ -904,7 +998,7 @@ static std::vector<AnimationClip> LoadAnimations(const std::string& filePath)
 				continue;
 			}
 
-			// Cubic Spline output is (in-tangent, value, out-tangent) per key; the others are one value per key.
+			// CUBICSPLINE output is (in-tangent, value, out-tangent) per key; the others are one value per key.
 			const bool cubic = (out.interp == Channel::CubicSpline);
 			const size_t perKey = cubic ? 3 : 1;
 			if (v.size() < t.size() * perKey * vc) { ++skipped; continue; }
@@ -950,8 +1044,13 @@ static std::vector<AnimationClip> LoadAnimations(const std::string& filePath)
 	return clips;
 }
 
-// Animation Playback
-// Resolves each channel's target name to a joint index. Exact-name matching
+// ---------------------------------------------------------------------------
+// Animation playback
+// ---------------------------------------------------------------------------
+
+// Resolves each channel's target name to a joint index. Exact-name matching;
+// this is the one place to change if you want a different binding policy.
+// binding[c] is the joint for clip.channels[c], or -1 if there's no match.
 static std::vector<int> BindClip(const AnimationClip& clip, const Skeleton& skel)
 {
 	std::unordered_map<std::string, int> byName;
@@ -967,7 +1066,8 @@ static std::vector<int> BindClip(const AnimationClip& clip, const Skeleton& skel
 	}
 	if (unmatched)
 	{
-		std::cerr << "BindClip '" << clip.name << "': " << unmatched << " of " << clip.channels.size() << " channels have no matching joint\n";
+		std::cerr << "BindClip '" << clip.name << "': " << unmatched << " of "
+			<< clip.channels.size() << " channels have no matching joint\n";
 	}
 	return binding;
 }
@@ -1011,9 +1111,11 @@ static glm::vec4 SampleChannel(const Channel& ch, float t)
 	}
 }
 
-// Fills out skin with one skinning matrix per joint (indexed like JOINTS_0).
-static void EvaluatePose(const Skeleton& skel, const AnimationClip& clip, const std::vector<int>& binding, float time, std::vector<glm::mat4>& outSkin)
+// Fills outBones with the final bone matrices (the whole bone buffer, all bone sets).
+static void EvaluatePose(const Model& model, const AnimationClip& clip, const std::vector<int>& binding,
+	float time, std::vector<glm::mat4>& outBones)
 {
+	const Skeleton& skel = model.skeleton;
 	const size_t n = skel.joints.size();
 	std::vector<glm::vec3> T(n), S(n);
 	std::vector<glm::quat> R(n);
@@ -1034,56 +1136,89 @@ static void EvaluatePose(const Skeleton& skel, const AnimationClip& clip, const 
 	}
 
 	std::vector<glm::mat4> global(n);
-	outSkin.resize(n);
 	for (int j : skel.order)
 	{
 		const Joint& joint = skel.joints[j];
 		const glm::mat4 local = glm::translate(glm::mat4(1.0f), T[j]) * glm::mat4_cast(glm::normalize(R[j])) * glm::scale(glm::mat4(1.0f), S[j]);
 		const glm::mat4& parent = (joint.parent >= 0) ? global[joint.parent] : joint.parentGlobal;
 		global[j] = parent * local;
-		outSkin[j] = global[j] * joint.inverseBind;
 	}
+
+	// Each skin uses its own inverse bind matrices. The mesh node's own transform is ignored for
+	// skinned meshes (glTF spec); the exporter already folded it into the inverse bind matrices.
+	outBones.assign(model.boneCount, glm::mat4(1.0f));
+	for (const BoneSet& set : model.boneSets)
+		for (size_t i = 0; i < set.joint.size(); ++i)
+			outBones[set.base + i] = global[set.joint[i]] * set.inverseBind[i];
 }
 
-static void PrintBindPoseError(const Skeleton& skel)
+static float MaxDiff(const glm::mat4& a, const glm::mat4& b)
 {
-	std::vector<glm::mat4> skin;
-	EvaluatePose(skel, AnimationClip{}, {}, 0.0f, skin);
+	float d = 0.0f;
+	for (int c = 0; c < 4; ++c)
+		for (int r = 0; r < 4; ++r) d = std::max(d, std::abs(a[c][r] - b[c][r]));
+	return d;
+}
 
-	float maxErr = 0.0f;
-	int worst = -1;
-	for (size_t j = 0; j < skin.size(); ++j)
+// In the bind pose every bone of a skin should produce the same matrix: the mesh's "bind shape"
+// (identity if the mesh object had no transform of its own, or e.g. a uniform scale if it did).
+// A bone that disagrees with the rest has a broken inverse bind matrix. That's harmless if no
+// vertex uses it (IK targets, pole targets), but if most bones disagree the skin is wrong.
+static void PrintBindPoseError(const Model& model)
+{
+	std::vector<glm::mat4> bones;
+	EvaluatePose(model, AnimationClip{}, {}, 0.0f, bones);
+
+	for (size_t s = 0; s < model.boneSets.size(); ++s)
 	{
-		for (int c = 0; c < 4; ++c)
+		const BoneSet& set = model.boneSets[s];
+		const size_t n = set.joint.size();
+		if (n == 0) continue;
+
+		// Reference = the matrix the largest number of bones agree on.
+		size_t ref = 0; int bestAgree = -1;
+		for (size_t i = 0; i < n; ++i)
 		{
-			for (int r = 0; r < 4; ++r)
-			{
-				const float err = std::abs(skin[j][c][r] - (c == r ? 1.0f : 0.0f));
-				if (err > maxErr) { maxErr = err; worst = (int)j; }
-			}
+			int agree = 0;
+			for (size_t j = 0; j < n; ++j)
+				if (MaxDiff(bones[set.base + i], bones[set.base + j]) < 1e-3f) ++agree;
+			if (agree > bestAgree) { bestAgree = agree; ref = i; }
 		}
+
+		const glm::mat4& shape = bones[set.base + ref];
+		int bad = 0, worst = -1;
+		float worstErr = 0.0f;
+		for (size_t i = 0; i < n; ++i)
+		{
+			const float err = MaxDiff(bones[set.base + i], shape);
+			if (err > 1e-3f) ++bad;
+			if (err > worstErr) { worstErr = err; worst = (int)i; }
+		}
+
+		std::cout << "Bone set " << s << ": bind shape scale (" << shape[0][0] << ", " << shape[1][1] << ", " << shape[2][2]
+			<< ") offset (" << shape[3][0] << ", " << shape[3][1] << ", " << shape[3][2] << "), "
+			<< bad << " of " << n << " bones disagree";
+		if (worst >= 0) std::cout << " (worst '" << model.skeleton.joints[set.joint[worst]].name << "', " << worstErr << ")";
+		std::cout << '\n';
 	}
-	std::cout << "Bind pose max error: " << maxErr;
-	if (worst >= 0) std::cout << " (joint " << worst << " '" << skel.joints[worst].name << "')";
-	std::cout << '\n';
 }
 
 struct AnimationPlayer
 {
-	const AnimationClip* clip = nullptr;
+	const AnimationClip* clip = nullptr;   // must outlive the player; don't let the clips vector reallocate
 	std::vector<int> binding;
 	float time = 0.0f;
 	float speed = 1.0f;
 	bool  loop = true;
 
-	std::vector<glm::mat4> skin;
+	std::vector<glm::mat4> bones;
 	GLuint boneSSBO = 0;
 
-	void Init(const Skeleton& skel)
+	void Init(const Model& model)
 	{
-		skin.assign(skel.joints.size(), glm::mat4(1.0f));
+		bones.assign(model.boneCount, glm::mat4(1.0f));
 		// Always allocate at least one mat4 so the buffer is valid for static models.
-		const size_t bytes = std::max<size_t>(skin.size(), 1) * sizeof(glm::mat4);
+		const size_t bytes = std::max<size_t>(bones.size(), 1) * sizeof(glm::mat4);
 		glCreateBuffers(1, &boneSSBO);
 		glNamedBufferStorage(boneSSBO, bytes, nullptr, GL_DYNAMIC_STORAGE_BIT);
 	}
@@ -1095,9 +1230,9 @@ struct AnimationPlayer
 		time = 0.0f;
 	}
 
-	void Update(float dt, const Skeleton& skel)
+	void Update(float dt, const Model& model)
 	{
-		if (skin.empty()) return;
+		if (model.boneCount == 0) return;
 
 		static const AnimationClip emptyClip;
 		if (clip && clip->duration > 0.0f)
@@ -1105,13 +1240,13 @@ struct AnimationPlayer
 			time += dt * speed;
 			time = loop ? std::fmod(time, clip->duration) : std::min(time, clip->duration);
 		}
-		EvaluatePose(skel, clip ? *clip : emptyClip, binding, time, skin);
-		glNamedBufferSubData(boneSSBO, 0, skin.size() * sizeof(glm::mat4), skin.data());
+		EvaluatePose(model, clip ? *clip : emptyClip, binding, time, bones);
+		glNamedBufferSubData(boneSSBO, 0, bones.size() * sizeof(glm::mat4), bones.data());
 	}
 
 	void Destroy()
 	{
-		if (boneSSBO) { glDeleteBuffers(1, &boneSSBO); }
+		if (boneSSBO) glDeleteBuffers(1, &boneSSBO);
 		boneSSBO = 0;
 	}
 };
@@ -1167,20 +1302,25 @@ int main()
 	glNamedBufferStorage(SSBO, sizeof(FrameData), nullptr, GL_DYNAMIC_STORAGE_BIT);
 	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, SSBO);
 
-	Model skinnedMesh = LoadModel("../../../resources/models/adventurer.glb", defaultTextures);
+	//Model skinnedMesh = LoadModel("../../../resources/models/bot.glb", defaultTextures);
 	//auto anims = LoadAnimations("../../../resources/animations/taunt.glb");
+
+	Model skinnedMesh = LoadModel("../../../resources/animations/adventurer.glb", defaultTextures);
 	auto anims = LoadAnimations("../../../resources/animations/adventurer.glb");
 
+	// uSkinned is set per primitive: skinned meshes use the bone buffer, static ones don't.
+	const GLint uSkinnedLoc = glGetUniformLocation(shaderProgram, "uSkinned");
 
-	// Skinning setup. Static models leave uSkinned at 0 and ignore the bone buffer.
-	glProgramUniform1i(shaderProgram, glGetUniformLocation(shaderProgram, "uSkinned"), skinnedMesh.skeleton.joints.empty() ? 0 : 1);
-	PrintBindPoseError(skinnedMesh.skeleton);
+	PrintBindPoseError(skinnedMesh);
 
 	AnimationPlayer player;
-	player.Init(skinnedMesh.skeleton);
+	player.Init(skinnedMesh);
+
+	glfwSetWindowUserPointer(window, &player);
+
 	if (!anims.empty())
 	{
-		player.Play(anims[0], skinnedMesh.skeleton);
+		player.Play(anims[1], skinnedMesh.skeleton);
 	}
 	else
 	{
@@ -1203,7 +1343,7 @@ int main()
 		float deltaTime = time - lastTime;
 		lastTime = time;
 
-		player.Update(deltaTime, skinnedMesh.skeleton);
+		player.Update(deltaTime, skinnedMesh);
 		glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, player.boneSSBO);
 
 		// MVP
@@ -1230,6 +1370,7 @@ int main()
 			};
 			glNamedBufferSubData(SSBO, 0, sizeof(FrameData), &frameData);
 
+			glProgramUniform1i(shaderProgram, uSkinnedLoc, prim.skinned ? 1 : 0);
 			glBindVertexArray(prim.VAO);
 			glDrawElements(GL_TRIANGLES, prim.indexCount, GL_UNSIGNED_INT, nullptr);
 		}

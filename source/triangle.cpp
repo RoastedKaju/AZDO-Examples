@@ -1,6 +1,8 @@
 #include <glad/gl.h>
 #include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
+#include <file_manager.hpp>
+#include <shader_manager.hpp>
 #include <iostream>
 
 static int sWidth = 800;
@@ -18,52 +20,6 @@ static void FrameBufferSizeCallback(GLFWwindow* window, int width, int height)
 	sWidth = width;
 	sHeight = height;
 	glViewport(0, 0, width, height);
-}
-
-const char* vertexShaderSource = R"(
-	#version 460 core
-	#extension GL_ARB_gpu_shader_int64 : require
-
-	layout (location = 0) in vec3 aPos;
-	layout (location = 1) in vec3 aColor;
-
-	layout (location = 0) out vec3 vColor;
-
-	void main() {
-		vColor = aColor;
-		gl_Position = vec4(aPos, 1.0);
-	}
-)";
-
-const char* fragmentShaderSource = R"(
-	#version 460 core
-	layout (location = 0) in vec3 vColor;
-
-	layout (location = 0) out vec4 FragColor;
-
-	void main() {
-		FragColor = vec4(vColor, 1.0);
-	}
-)";
-
-static GLuint CreateShaderProgram()
-{
-	GLuint vs = glCreateShader(GL_VERTEX_SHADER);
-	glShaderSource(vs, 1, &vertexShaderSource, nullptr);
-	glCompileShader(vs);
-
-	GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
-	glShaderSource(fs, 1, &fragmentShaderSource, nullptr);
-	glCompileShader(fs);
-
-	GLuint program = glCreateProgram();
-	glAttachShader(program, vs);
-	glAttachShader(program, fs);
-	glLinkProgram(program);
-
-	glDeleteShader(vs);
-	glDeleteShader(fs);
-	return program;
 }
 
 int main()
@@ -151,8 +107,14 @@ int main()
 	// Connect VBO to binding point 0 on VAO
 	glVertexArrayVertexBuffer(VAO, 0, VBO, 0, sizeof(Vertex));
 
-	// Build shader program
-	GLuint shaderProgram = CreateShaderProgram();
+	// Read shader files and create shader program
+	std::string vs = FileManager::ReadTextFile("../../../resources/shaders/triangle/vertex.glsl");
+	std::string fs = FileManager::ReadTextFile("../../../resources/shaders/triangle/fragment.glsl");
+	GLuint shaderProgram = ShaderManager::CreateShaderProgram(vs, fs);
+	if (!shaderProgram)
+	{
+		return EXIT_FAILURE;
+	}
 
 	while (!glfwWindowShouldClose(window))
 	{
