@@ -41,6 +41,10 @@ struct FrameData
 	glm::mat4 model;
 	glm::mat4 view;
 	glm::mat4 proj;
+};
+
+struct MaterialData
+{
 	GLuint64 baseColorHandle;
 	GLuint64 normalHandle;
 	GLuint64 metallicRoughnessHandle;
@@ -140,22 +144,12 @@ layout (location = 2) out vec3 vNormal;
 layout (location = 3) out vec3 vTangent;
 layout (location = 4) out vec3 vBitangent;
 
-struct FrameData {
+layout (std140, binding = 0) readonly
+uniform FrameData {
 	mat4 model;
 	mat4 view;
 	mat4 proj;
-	uvec2 baseColorHandle;
-	uvec2 normalHandle;
-	uvec2 metallicRoughnessHandle;
-	uvec2 occlusionHandle;
-	uvec2 emissiveHandle;
-	float roughnessFactor;
-	float metallicFactor;
-};
-
-layout (std430, binding = 0) buffer SceneData {
-	FrameData frameData;
-};
+} frameData;
 
 void main() {
 	vTexCoord = aTexCoord;
@@ -174,7 +168,6 @@ void main() {
 	vTangent = T;
 	vBitangent = B;
 
-	// Final clip space position
 	gl_Position = frameData.proj * frameData.view * worldPos;
 }
 )";
@@ -192,10 +185,7 @@ layout (location = 4) in vec3 vBitangent;
 
 layout (location = 0) out vec4 FragColor;
 
-struct FrameData {
-	mat4 model;
-	mat4 view;
-	mat4 proj;
+struct MaterialData {
 	uvec2 baseColorHandle;
 	uvec2 normalHandle;
 	uvec2 metallicRoughnessHandle;
@@ -205,8 +195,11 @@ struct FrameData {
 	float metallicFactor;
 };
 
-layout (std430, binding = 0) buffer SceneData {
-	FrameData frameData;
+layout (location = 1) uniform uint uMaterialIndex;
+
+layout (std430, binding = 0) readonly
+buffer MaterialBuffer {
+	MaterialData materials[];
 };
 
 const float PI = 3.14159265359;
@@ -250,20 +243,20 @@ vec3 fresnelSchlick(float cosTheta, vec3 F0) {
 
 void main() {
 	// Sample albedo & convert to linear space
-	sampler2D baseTex = sampler2D(frameData.baseColorHandle);
+	sampler2D baseTex = sampler2D(materials[uMaterialIndex].baseColorHandle);
 	vec4 albedoSample = texture(baseTex, vTexCoord);
 	vec3 albedo = pow(albedoSample.rgb, vec3(2.2));
 
 	// Sample packed metallic-roughness map
-	sampler2D mrTex = sampler2D(frameData.metallicRoughnessHandle);
+	sampler2D mrTex = sampler2D(materials[uMaterialIndex].metallicRoughnessHandle);
 	vec4 mrSample = texture(mrTex, vTexCoord);
 
-	float roughness = clamp(mrSample.g * frameData.roughnessFactor, 0.05, 1.0);
-	float metallic  = clamp(mrSample.b * frameData.metallicFactor, 0.0, 1.0);
+	float roughness = clamp(mrSample.g * materials[uMaterialIndex].roughnessFactor, 0.05, 1.0);
+	float metallic  = clamp(mrSample.b * materials[uMaterialIndex].metallicFactor, 0.0, 1.0);
 
 	// Normal mapping
 	mat3 TBN = mat3(normalize(vTangent), normalize(vBitangent), normalize(vNormal));
-	sampler2D normalTex = sampler2D(frameData.normalHandle);
+	sampler2D normalTex = sampler2D(materials[uMaterialIndex].normalHandle);
 	vec3 tangentNormal = texture(normalTex, vTexCoord).rgb * 2.0 - 1.0;
 
 	float normalStrength = 1.5;
@@ -746,14 +739,41 @@ int main()
 	FallbackTextures defaultTextures{};
 	defaultTextures.Initialize();
 
-	// SSBO holding per-frame data
-	GLuint SSBO;
-	glCreateBuffers(1, &SSBO);
-	glNamedBufferStorage(SSBO, sizeof(FrameData), nullptr, GL_DYNAMIC_STORAGE_BIT);
-	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, SSBO);
+	// UBO holding per-frame data
+	GLuint perFrameUBO;
+	glCreateBuffers(1, &perFrameUBO);
+	glNamedBufferStorage(perFrameUBO, sizeof(FrameData), nullptr, GL_DYNAMIC_STORAGE_BIT);
+	glBindBufferBase(GL_UNIFORM_BUFFER, 0, perFrameUBO);
 
 	// Load Ibex model
 	Model ibex = LoadModel("../../../resources/models/ibex.glb", defaultTextures);
+
+	// Allocate space for SSBO for every primitive
+	GLuint materialSSBO;
+	glCreateBuffers(1, &materialSSBO);
+	glNamedBufferStorage(materialSSBO, sizeof(MaterialData) * ibex.primitives.size(), nullptr, GL_DYNAMIC_STORAGE_BIT);
+	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, materialSSBO);
+
+	// Send material data and texture handles once, use offset for different primitives
+	for (size_t i = 0; i < ibex.primitives.size(); ++i)
+	{
+		const Primitive& prim = ibex.primitives[i];
+
+		MaterialData materialData
+		{
+			.baseColorHandle = prim.baseColorHandle,
+			.normalHandle = prim.normalHandle,
+			.metallicRoughnessHandle = prim.metallicRoughnessHandle,
+			.occlusionHandle = prim.occlusionHandle,
+			.emissiveHandle = prim.emissiveHandle,
+			.roughnessFactor = 1.0f,
+			.metallicFactor = 1.0f
+		};
+		// Send to GPU with the correct offset
+		glNamedBufferSubData(materialSSBO, i * sizeof(MaterialData), sizeof(MaterialData), &materialData);
+	}
+	// Get material index uniform location
+	GLint materialIndexLoc = glGetUniformLocation(shaderProgram, "uMaterialIndex");
 
 	while (!glfwWindowShouldClose(window))
 	{
@@ -776,25 +796,22 @@ int main()
 		glClearColor(0.1f, 0.12f, 0.1f, 1.0f);
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+		FrameData frameData
+		{
+			.model = model,
+			.view = view,
+			.proj = projection
+		};
+		glNamedBufferSubData(perFrameUBO, 0, sizeof(FrameData), &frameData);
+
 		// Render Ibex
 		glUseProgram(shaderProgram);
-		for (const Primitive& prim : ibex.primitives)
+		for (size_t i = 0; i < ibex.primitives.size(); ++i)
 		{
-			FrameData frameData
-			{
-				.model = model,
-				.view = view,
-				.proj = projection,
-				.baseColorHandle = prim.baseColorHandle,
-				.normalHandle = prim.normalHandle,
-				.metallicRoughnessHandle = prim.metallicRoughnessHandle,
-				.occlusionHandle = prim.occlusionHandle,
-				.emissiveHandle = prim.emissiveHandle,
-				.roughnessFactor = 1.0f,
-				.metallicFactor = 1.0f
-			};
-			glNamedBufferSubData(SSBO, 0, sizeof(FrameData), &frameData);
-
+			// Send index for material data
+			const Primitive& prim = ibex.primitives[i];
+			glProgramUniform1ui(shaderProgram, materialIndexLoc, (GLuint)i);
+			// Draw
 			glBindVertexArray(prim.VAO);
 			glDrawElements(GL_TRIANGLES, prim.indexCount, GL_UNSIGNED_INT, nullptr);
 		}
@@ -821,7 +838,8 @@ int main()
 
 	defaultTextures.Cleanup();
 
-	glDeleteBuffers(1, &SSBO);
+	glDeleteBuffers(1, &perFrameUBO);
+	glDeleteBuffers(1, &materialSSBO);
 	glDeleteProgram(shaderProgram);
 	glfwDestroyWindow(window);
 	glfwTerminate();
