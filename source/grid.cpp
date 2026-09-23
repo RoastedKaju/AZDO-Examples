@@ -93,10 +93,16 @@ void main() {
 static constexpr const char* convertFS = R"(
 #version 460 core
 
-layout(location=0) in vec3 direction;
-layout(location=0) out vec4 color;
+#extension GL_ARB_bindless_texture : require
+#extension GL_ARB_gpu_shader_int64 : require
 
-layout(binding=0) uniform sampler2D panorama;
+layout (location = 0) in vec3 direction;
+layout (location = 0) out vec4 color;
+
+layout (binding = 0)
+readonly uniform Panorama{
+	uvec2 panoramaHandle;
+};
 
 vec2 uvFromDirection(vec3 d) {
 	d = normalize(d);
@@ -104,21 +110,29 @@ vec2 uvFromDirection(vec3 d) {
 }
 
 void main() {
-	color = vec4(texture(panorama,uvFromDirection(direction)).rgb,1.0);
+	sampler2D panoramaSampler = sampler2D(panoramaHandle);
+	color = vec4(texture(panoramaSampler,uvFromDirection(direction)).rgb,1.0);
 }
 )";
 
 static constexpr const char* skyboxFS = R"(
 #version 460 core
 
+#extension GL_ARB_bindless_texture : require
+#extension GL_ARB_gpu_shader_int64 : require
+
 in vec3 direction;
 
-layout(location=0) out vec4 color;
+layout (location = 0) out vec4 color;
 
-layout(binding=0) uniform samplerCube environmentMap;
+layout (binding = 0)
+readonly uniform CubemapData {
+	uvec2 cubemapHandle;
+};
 
 void main() {
-	vec3 hdr = texture(environmentMap, normalize(direction)).rgb;
+	samplerCube cubemapSampler = samplerCube(cubemapHandle);
+	vec3 hdr = texture(cubemapSampler, normalize(direction)).rgb;
 
 	float exposure = 1.0;
 	vec3 mapped = vec3(1.0) - exp(-hdr * exposure);
@@ -131,7 +145,7 @@ void main() {
 const char* gridVS = R"(
 #version 460 core
 
-layout(std140, binding = 0) uniform Camera
+layout(std140, binding = 1) uniform Camera
 {
     mat4 uView;
     mat4 uProjection;
@@ -167,7 +181,7 @@ void main()
 const char* gridFS = R"(
 #version 460 core
 
-layout(std140, binding = 0) uniform Camera
+layout(std140, binding = 1) uniform Camera
 {
     mat4 uView;
     mat4 uProjection;
@@ -228,7 +242,7 @@ void main()
     float distanceToCamera = length(worldPos.xz - uCameraPosition.xz);
 
     // Controls where the fading starts and become completely invisible
-    float fade = 1.0 - smoothstep(20.0, 40.0, distanceToCamera);
+    float fade = 1.0 - smoothstep(20.0, 80.0, distanceToCamera);
     float alpha = max(max(minor, major), max(xAxis, zAxis)) * fade;
 
     if (alpha < 0.002)
@@ -244,7 +258,7 @@ struct Grid
 	GLuint UBO;
 };
 
-struct CamerData
+struct CameraData
 {
 	glm::mat4 uView;
 	glm::mat4 uProjection;
@@ -260,8 +274,8 @@ static Grid MakeGrid()
 	// No need for a VBO or EBO, the data is hard-coded in shaders
 
 	glCreateBuffers(1, &result.UBO);
-	glNamedBufferStorage(result.UBO, sizeof(CamerData), nullptr, GL_DYNAMIC_STORAGE_BIT);
-	glBindBufferBase(GL_UNIFORM_BUFFER, 0, result.UBO);
+	glNamedBufferStorage(result.UBO, sizeof(CameraData), nullptr, GL_DYNAMIC_STORAGE_BIT);
+	glBindBufferBase(GL_UNIFORM_BUFFER, 1, result.UBO);
 
 	return result;
 }
@@ -377,10 +391,17 @@ static GLuint PanoramaToCubemap(GLuint panorama, GLuint cubeVAO, GLuint conversi
 	glUseProgram(conversionProgram);
 	GLint projectionLocation = glGetUniformLocation(conversionProgram, "projection");
 	GLint viewLocation = glGetUniformLocation(conversionProgram, "view");
+	// Get panorama handle
+	GLuint64 panoramaHandle = glGetTextureHandleARB(panorama);
+	glMakeTextureHandleResidentARB(panoramaHandle);
 
+	// UBO to send panorama handle
+	GLuint conversionUBO;
+	glCreateBuffers(1, &conversionUBO);
+	glNamedBufferStorage(conversionUBO, sizeof(GLuint64), &panoramaHandle, 0); // No need for dynamic sub-data just send it once
+	glBindBufferBase(GL_UNIFORM_BUFFER, 0, conversionUBO);
+	// Send to shader
 	glUniformMatrix4fv(projectionLocation, 1, GL_FALSE, &projection[0][0]);
-
-	glBindTextureUnit(0, panorama);
 
 	glViewport(0, 0, size, size);
 	glBindFramebuffer(GL_FRAMEBUFFER, FBO);
@@ -410,7 +431,8 @@ static GLuint PanoramaToCubemap(GLuint panorama, GLuint cubeVAO, GLuint conversi
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
 	glDeleteFramebuffers(1, &FBO);
-	//glDeleteRenderbuffers(1, &depth);
+	glDeleteBuffers(1, &conversionUBO);
+	glMakeTextureHandleNonResidentARB(panoramaHandle);
 
 	// Restore
 	glEnable(GL_DEPTH_TEST);
@@ -472,7 +494,16 @@ int main()
 	// you can now delete the HDR texture
 	glDeleteTextures(1, &HDR);
 
-	// Cache location
+	// Get cubemap's texture handle
+	GLuint64 cubemapHandle = glGetTextureHandleARB(cubemap);
+	glMakeTextureHandleResidentARB(cubemapHandle);
+	// Make UBO and send this handle to GPU
+	GLuint cubemapUBO;
+	glCreateBuffers(1, &cubemapUBO);
+	glNamedBufferStorage(cubemapUBO, sizeof(GLuint64), &cubemapHandle, 0); // No need for dynamic sub-data, just send the handle once
+	glBindBufferBase(GL_UNIFORM_BUFFER, 0, cubemapUBO); // index 1 will be camera UBO for Grid
+
+	// Cache locations
 	const GLint projectionLocation = glGetUniformLocation(skyboxProgram, "projection");
 	const GLint viewLocation = glGetUniformLocation(skyboxProgram, "view");
 
@@ -500,7 +531,7 @@ int main()
 		glm::mat4 view = glm::lookAt(eye, target, glm::vec3(0.0f, 1.0f, 0.0f));
 		glm::mat4 inverseViewProjection = inverse(projection * view);
 
-		CamerData cameraData
+		CameraData cameraData
 		{
 			.uView = view,
 			.uProjection = projection,
@@ -527,7 +558,6 @@ int main()
 		glUseProgram(skyboxProgram);
 		glUniformMatrix4fv(projectionLocation, 1, GL_FALSE, &projection[0][0]);
 		glUniformMatrix4fv(viewLocation, 1, GL_FALSE, &skyboxView[0][0]);
-		glBindTextureUnit(0, cubemap);
 		glBindVertexArray(cubeMesh.VAO);
 		glDrawArrays(GL_TRIANGLES, 0, 36);
 
@@ -555,6 +585,8 @@ int main()
 	glDeleteTextures(1, &cubemap);
 	glDeleteVertexArrays(1, &cubeMesh.VAO);
 	glDeleteBuffers(1, &cubeMesh.VBO);
+	glDeleteBuffers(1, &cubemapUBO);
+	glMakeTextureHandleNonResidentARB(cubemapHandle);
 	glDeleteVertexArrays(1, &grid.VAO);
 	glDeleteBuffers(1, &grid.UBO);
 	glfwDestroyWindow(window);
