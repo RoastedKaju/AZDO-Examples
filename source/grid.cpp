@@ -128,13 +128,151 @@ void main() {
 }
 )";
 
+const char* gridVS = R"(
+#version 460 core
+
+layout(std140, binding = 0) uniform Camera
+{
+    mat4 uView;
+    mat4 uProjection;
+    mat4 uInvViewProjection; // inverse(uProjection * uView)
+    vec4 uCameraPosition;
+};
+
+layout (location = 0) out vec3 vNearPoint;
+layout (location = 1) out vec3 vFarPoint;
+
+const vec2 kFullscreenQuad[6] = vec2[6](
+    vec2(-1.0, -1.0), vec2( 1.0, -1.0), vec2( 1.0,  1.0),
+    vec2(-1.0, -1.0), vec2( 1.0,  1.0), vec2(-1.0,  1.0)
+);
+
+vec3 unproject(vec2 ndcXY, float ndcZ)
+{
+    vec4 p = uInvViewProjection * vec4(ndcXY, ndcZ, 1.0);
+    return p.xyz / p.w;
+}
+
+void main()
+{
+    vec2 ndc = kFullscreenQuad[gl_VertexID];
+
+    // Default OpenGL depth convention: NDC z is [-1, 1].
+    vNearPoint = unproject(ndc, -1.0);
+    vFarPoint  = unproject(ndc,  1.0);
+
+    gl_Position = vec4(ndc, 0.0, 1.0);
+})";
+
+const char* gridFS = R"(
+#version 460 core
+
+layout(std140, binding = 0) uniform Camera
+{
+    mat4 uView;
+    mat4 uProjection;
+    mat4 uInvViewProjection;
+    vec4 uCameraPosition;
+};
+
+layout (location = 0) in vec3 vNearPoint;
+layout (location = 1) in vec3 vFarPoint;
+
+layout(location = 0) out vec4 outColor;
+
+float gridLine(vec2 worldXZ, float spacing)
+{
+    vec2 coord = worldXZ / spacing;
+    vec2 derivative = fwidth(coord);
+
+    // Distance to nearest grid line, expressed in pixels.
+    vec2 line = abs(fract(coord - 0.5) - 0.5) / derivative;
+    return 1.0 - min(min(line.x, line.y), 1.0);
+}
+
+void main()
+{
+    vec3 ray = vFarPoint - vNearPoint;
+
+    // Intersection with y = 0 (the XZ grid plane).
+    float t = -vNearPoint.y / ray.y;
+    if (t <= 0.0)
+        discard;
+
+    vec3 worldPos = vNearPoint + t * ray;
+
+    // Discard intersections beyond the camera far plane.
+    vec4 clip = uProjection * uView * vec4(worldPos, 1.0);
+    float ndcDepth = clip.z / clip.w;
+    if (ndcDepth < -1.0 || ndcDepth > 1.0)
+        discard;
+
+    // Convert OpenGL's default NDC depth [-1, 1] to window depth [0, 1].
+    gl_FragDepth = ndcDepth * 0.5 + 0.5;
+
+    float minor = gridLine(worldPos.xz, 1.0);
+    float major = gridLine(worldPos.xz, 10.0);
+
+    float xAxis = 1.0 - smoothstep(0.0, fwidth(worldPos.z) * 1.5, abs(worldPos.z));
+    float zAxis = 1.0 - smoothstep(0.0, fwidth(worldPos.x) * 1.5, abs(worldPos.x));
+
+    vec3 minorColor = vec3(0.50, 0.50, 0.50);
+    vec3 majorColor = vec3(0.20, 0.20, 0.20);
+    vec3 xAxisColor = vec3(1.00, 0.10, 0.10);
+    vec3 zAxisColor = vec3(0.10, 0.10, 1.00);
+
+    vec3 color = mix(minorColor, majorColor, major);
+    color = mix(color, xAxisColor, xAxis); // X axis
+    color = mix(color, zAxisColor, zAxis); // Z axis
+
+    float distanceToCamera = length(worldPos.xz - uCameraPosition.xz);
+
+    // Controls where the fading starts and become completely invisible
+    float fade = 1.0 - smoothstep(20.0, 40.0, distanceToCamera);
+    float alpha = max(max(minor, major), max(xAxis, zAxis)) * fade;
+
+    if (alpha < 0.002)
+        discard;
+
+    outColor = vec4(color, alpha);
+}
+)";
+
+struct Grid
+{
+	GLuint VAO;
+	GLuint UBO;
+};
+
+struct CamerData
+{
+	glm::mat4 uView;
+	glm::mat4 uProjection;
+	glm::mat4 uInvViewProjection;
+	glm::vec4 uCameraPosition;
+};
+
+static Grid MakeGrid()
+{
+	Grid result{};
+
+	glCreateVertexArrays(1, &result.VAO);
+	// No need for a VBO or EBO, the data is hard-coded in shaders
+
+	glCreateBuffers(1, &result.UBO);
+	glNamedBufferStorage(result.UBO, sizeof(CamerData), nullptr, GL_DYNAMIC_STORAGE_BIT);
+	glBindBufferBase(GL_UNIFORM_BUFFER, 0, result.UBO);
+
+	return result;
+}
+
 struct CubeMesh
 {
 	GLuint VAO;
 	GLuint VBO;
 };
 
-static CubeMesh MakeCubeVAO()
+static CubeMesh MakeCube()
 {
 	CubeMesh result{};
 
@@ -326,17 +464,21 @@ int main()
 	// Cubemap state
 	glEnable(GL_TEXTURE_CUBE_MAP_SEAMLESS);
 
-	CubeMesh cubeMesh = MakeCubeVAO();
+	CubeMesh cubeMesh = MakeCube();
 	GLuint conversionProgram = CreateShaderProgram(cubeVS, convertFS);
 	GLuint skyboxProgram = CreateShaderProgram(cubeVS, skyboxFS);
 	GLuint HDR = LoadHDRI("../../../resources/textures/sky.hdr");
-	GLuint cubemap = PanoramaToCubemap(HDR, cubeMesh.VAO, conversionProgram, 512);
+	GLuint cubemap = PanoramaToCubemap(HDR, cubeMesh.VAO, conversionProgram, 512); // Size should be width of texture / 4
 	// you can now delete the HDR texture
 	glDeleteTextures(1, &HDR);
 
 	// Cache location
 	const GLint projectionLocation = glGetUniformLocation(skyboxProgram, "projection");
 	const GLint viewLocation = glGetUniformLocation(skyboxProgram, "view");
+
+	// Grid
+	Grid grid = MakeGrid();
+	GLuint gridProgram = CreateShaderProgram(gridVS, gridFS);
 
 	while (!glfwWindowShouldClose(window))
 	{
@@ -349,31 +491,58 @@ int main()
 		}
 
 		float time = (float)glfwGetTime();
+		float yaw = time * 0.12f;
 
-		glm::vec3 eye(0.0f, 0.0f, 0.0f);
-		glm::vec3 target(std::sin(time * 0.12f), 0.0f, std::cos(time * 0.12f));
+		glm::vec3 eye(0.0f, 2.0f, 5.0f);
+		glm::vec3 forward(std::sin(yaw), 0.0f, std::cos(yaw));
+		glm::vec3 target = eye + forward;
 		glm::mat4 projection = glm::perspective(glm::radians(60.0f), (float)sWidth / (float)sHeight, 0.1f, 100.0f);
 		glm::mat4 view = glm::lookAt(eye, target, glm::vec3(0.0f, 1.0f, 0.0f));
-		// Remove translation for skybox (move this to shader later)
-		view[3] = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+		glm::mat4 inverseViewProjection = inverse(projection * view);
+
+		CamerData cameraData
+		{
+			.uView = view,
+			.uProjection = projection,
+			.uInvViewProjection = inverseViewProjection,
+			.uCameraPosition = glm::vec4(eye, 1.0f)
+		};
+		// Send UBO to shader
+		glNamedBufferSubData(grid.UBO, 0, sizeof(cameraData), &cameraData);
 
 		glClearColor(0.1f, 0.12f, 0.1f, 1.0f);
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-		// Render skybox
-		glDisable(GL_CULL_FACE);
+		// Render opaque scene objects here first.
+
+		// Render skybox: only fill pixels still at far depth.
+		glm::mat4 skyboxView = glm::mat4(glm::mat3(view));
+
 		glEnable(GL_DEPTH_TEST);
 		glDepthFunc(GL_LEQUAL);
+		glDepthMask(GL_FALSE);
+
+		glDisable(GL_CULL_FACE); // Or cull front faces for an inward cube.
 
 		glUseProgram(skyboxProgram);
 		glUniformMatrix4fv(projectionLocation, 1, GL_FALSE, &projection[0][0]);
-		glUniformMatrix4fv(viewLocation, 1, GL_FALSE, &view[0][0]);
-
+		glUniformMatrix4fv(viewLocation, 1, GL_FALSE, &skyboxView[0][0]);
 		glBindTextureUnit(0, cubemap);
 		glBindVertexArray(cubeMesh.VAO);
 		glDrawArrays(GL_TRIANGLES, 0, 36);
 
-		// Restore states
+		// Render grid over skybox, but behind opaque objects.
+		glEnable(GL_BLEND);
+		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+		glDepthFunc(GL_LEQUAL);
+		glDepthMask(GL_FALSE);
+
+		glUseProgram(gridProgram);
+		glBindVertexArray(grid.VAO);
+		glDrawArrays(GL_TRIANGLES, 0, 6);
+
+		glDisable(GL_BLEND);
+		glDepthMask(GL_TRUE);
 		glDepthFunc(GL_LESS);
 		glEnable(GL_CULL_FACE);
 
@@ -386,6 +555,8 @@ int main()
 	glDeleteTextures(1, &cubemap);
 	glDeleteVertexArrays(1, &cubeMesh.VAO);
 	glDeleteBuffers(1, &cubeMesh.VBO);
+	glDeleteVertexArrays(1, &grid.VAO);
+	glDeleteBuffers(1, &grid.UBO);
 	glfwDestroyWindow(window);
 	glfwTerminate();
 	return EXIT_SUCCESS;
