@@ -142,7 +142,7 @@ int main()
 	glDeleteBuffers(1, &EBO);
 	glDeleteBuffers(1, &UBO);
 
-	window.DestroyWindow();
+	window.Destroy();
 
 	return EXIT_SUCCESS;
 }
