@@ -2,8 +2,7 @@
 
 #include <glad/gl.h>
 #include <GLFW/glfw3.h>
-#include <utility>
-#include <iostream>
+#include <common.hpp>
 
 namespace WindowManager
 {
@@ -85,7 +84,7 @@ namespace WindowManager
 			return glfwWindowShouldClose(pWindow);
 		}
 
-		bool PollEvents() const
+		bool ProcessEvents()
 		{
 			glfwPollEvents();
 
@@ -93,6 +92,13 @@ namespace WindowManager
 			{
 				glfwWaitEvents();
 				return false;
+			}
+
+			if (mResized)
+			{
+				mResized = false;
+				glfwGetFramebufferSize(pWindow, &mWidth, &mHeight);
+				glViewport(0, 0, mWidth, mHeight);
 			}
 
 			return true;
@@ -108,14 +114,16 @@ namespace WindowManager
 
 		// Getters
 		GLFWwindow* GetWindow() const { return pWindow; }
-		std::pair<int, int> GetSize() const { return std::make_pair(mWidth, mHeight); }
+		Extent2D GetSize() const { return { mWidth, mHeight }; }
 
 		// Setters
 		void SetSize(const int inWidth, const int inHeight) { mWidth = inWidth; mHeight = inHeight; }
+		void SetResized(const bool inResized) { mResized = inResized; }
 
 	private:
 		int mWidth{ 800 };
 		int mHeight{ 600 };
+		bool mResized{ false };
 
 		GLFWwindow* pWindow{ nullptr };
 	};
@@ -125,7 +133,7 @@ namespace WindowManager
 		if (Window* owningWindow = static_cast<Window*>(glfwGetWindowUserPointer(inWindow)))
 		{
 			owningWindow->SetSize(inWidth, inHeight);
-			glViewport(0, 0, inWidth, inHeight);
+			owningWindow->SetResized(true);
 		}
 	}
 

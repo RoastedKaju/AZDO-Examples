@@ -1,8 +1,7 @@
 #pragma once
 
 #include <glad/gl.h>
-#include <string>
-#include <iostream>
+#include <common.hpp>
 
 namespace ShaderManager
 {
