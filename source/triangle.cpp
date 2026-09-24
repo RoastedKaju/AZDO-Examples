@@ -25,8 +25,6 @@ int main()
 	window.CreateWindow("Triangle", 800, 600);
 	window.EnableOutputDebug();
 
-	FileManager::LoadGlTF("../../../resources/models/ibex.glb");
-
 	// Create VBO with DSA
 	GLuint VBO;
 	glCreateBuffers(1, &VBO);
@@ -79,7 +77,7 @@ int main()
 	glDeleteVertexArrays(1, &VAO);
 	glDeleteBuffers(1, &VBO);
 
-	window.DestroyWindow();
+	window.Destroy();
 
 	return EXIT_SUCCESS;
 }

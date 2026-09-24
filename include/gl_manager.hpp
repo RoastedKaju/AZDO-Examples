@@ -66,6 +66,12 @@ namespace GlDevice
 			}
 		}
 
+		GLuint64 baseColorHandle{ 0 };
+		GLuint64 normalMapHandle{ 0 };
+		GLuint64 metallicRoughnessMapHandle{ 0 };
+		GLuint64 occlusionHandle{ 0 };
+		GLuint64 emissiveHandle{ 0 };
+
 	private:
 		GLuint64 Create1x1Texture(const uint8_t inPixels[4])
 		{
@@ -85,12 +91,6 @@ namespace GlDevice
 			}
 			return handle;
 		}
-
-		GLuint64 baseColorHandle{ 0 };
-		GLuint64 normalMapHandle{ 0 };
-		GLuint64 metallicRoughnessMapHandle{ 0 };
-		GLuint64 occlusionHandle{ 0 };
-		GLuint64 emissiveHandle{ 0 };
 
 		std::vector<GLuint> textures;
 	};

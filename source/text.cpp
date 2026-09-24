@@ -110,18 +110,21 @@ const char* textVertexShader = R"(
 layout (location = 0) in vec2 aPos;
 layout (location = 1) in vec2 aUV;
 layout (location = 2) in vec4 aColor;
+layout (location = 3) in uint aAtlasIndex;
 
 layout (location = 0) out vec2 vUV;
 layout (location = 1) out vec4 vColor;
+layout (location = 2) flat out uint vAtlasIndex;
 
 layout (std430, binding = 1) readonly buffer PerDrawData {
 	mat4 uProj;
-	uvec2 uTexHandle;
+	uvec2 uAtlasHandles[16];
 };
 
 void main() {
 	vUV = aUV;
 	vColor = aColor;
+	vAtlasIndex = aAtlasIndex;
 	gl_Position = uProj * vec4(aPos, 0.0, 1.0);
 }
 )";
@@ -132,105 +135,91 @@ const char* textFragShader = R"(
 
 layout (location = 0) in vec2 vUV;
 layout (location = 1) in vec4 vColor;
+layout (location = 2) flat in uint vAtlasIndex;
 layout (location = 0) out vec4 FragColor;
 
 layout (std430, binding = 1) readonly buffer PerDrawData {
 	mat4 uProj;
-	uvec2 uTexHandle;
+	uvec2 uAtlasHandles[16];
 };
 
 void main() {
-	sampler2D baseTex = sampler2D(uTexHandle);
-	float alpha = texture(baseTex, vUV).r;
+	sampler2D Tex = sampler2D(uAtlasHandles[vAtlasIndex]);
+	float alpha = texture(Tex, vUV).r;
 	FragColor = vec4(vColor.rgb, alpha * vColor.a);
 }
 )";
 
 // Text rendering types
+
+static constexpr size_t cMaxFontAtlases = 16; // Must match the GLSL array
 struct TextVertex
 {
 	glm::vec2 position;
 	glm::vec2 uv;
 	glm::vec4 color;
+	GLuint atlasIndex;
 };
 
 struct PerDrawTextData
 {
 	glm::mat4 proj;
-	GLuint64 textureHandle;
+	GLuint64 atlasHandles[cMaxFontAtlases];
 };
 
-struct TextRenderer
+static_assert(sizeof(PerDrawTextData) == sizeof(glm::mat4) + cMaxFontAtlases * sizeof(glm::uvec2), "Per Draw Text Data must be tightly packed to match the std430 layout (no padding assumed).");
+
+// One baked file font, pixel size combination, bold, italic and different sizes need their own atlas
+// STB bakes glyph bitmaps at a fixed size
+struct FontAtlas
 {
 	GLuint texture = 0;
 	GLuint64 textureHandle = 0;
-	GLuint program = 0;
-	GLuint VAO = 0, VBO = 0, SSBO = 0;
 	stbtt_packedchar charData[96]{}; // ASCII 32..127
 	int atlasWidth = 512;
 	int atlasHeight = 512;
 	float fontSize = 32.0f;
+};
+
+// One "run" of text: a span that shares one font and color
+// Single bold world in a sentence is runs: {regular, bold, regular}
+struct TextSegment
+{
+	std::string text;
+	int fontIndex;
+	glm::vec3 color;
+};
+
+struct TextRenderer
+{
+	GLuint program;
+	GLuint VAO = 0;
+	GLuint VBO = 0;
+	GLuint SSBO = 0;
+	std::vector<FontAtlas> fonts;
+	// Whole frame's budget
 	size_t maxQuads = 4069; // capacity of dynamic VBO, in quads (6 verts each)
 
 	// Per-frame accumulator, cleared not reallocated in begin frame function
 	std::vector<TextVertex> frameVerts;
 	glm::mat4 frameProj{};
 
-	bool Init(const char* fontPath)
+	bool Init()
 	{
-		std::ifstream file(fontPath, std::ios::binary | std::ios::ate);
-		if (!file)
-		{
-			std::cerr << "Failed to open font file: " << fontPath << std::endl;
-			return false;
-		}
-
-		std::streamsize size = file.tellg();
-		file.seekg(0, std::ios::beg);
-		std::vector<unsigned char> ttfBuffer((size_t)size);
-		if (!file.read(reinterpret_cast<char*>(ttfBuffer.data()), size))
-		{
-			std::cerr << "Failed to read font: " << fontPath << std::endl;
-			return false;
-		}
-
-		// bake atlas
-		std::vector<unsigned char> bitmap((size_t)atlasWidth * atlasHeight);
-		stbtt_pack_context packCtx;
-		if (!stbtt_PackBegin(&packCtx, bitmap.data(), atlasWidth, atlasHeight, 0, 1, nullptr))
-		{
-			std::cerr << "STB TTF pack begin failed.\n";
-			return false;
-		}
-		stbtt_PackSetOversampling(&packCtx, 2, 2);
-		stbtt_PackFontRange(&packCtx, ttfBuffer.data(), 0, fontSize, 32, 96, charData);
-		stbtt_PackEnd(&packCtx);
-
-		// Upload atlas as single channel texture
-		glCreateTextures(GL_TEXTURE_2D, 1, &texture);
-		glTextureStorage2D(texture, 1, GL_R8, atlasWidth, atlasHeight);
-		glTextureSubImage2D(texture, 0, 0, 0, atlasWidth, atlasHeight, GL_RED, GL_UNSIGNED_BYTE, bitmap.data());
-		glTextureParameteri(texture, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-		glTextureParameteri(texture, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-		glTextureParameteri(texture, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-		glTextureParameteri(texture, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-		textureHandle = glGetTextureHandleARB(texture);
-		glMakeTextureHandleResidentARB(textureHandle);
-
-		// Shader
 		program = CreateShaderProgram(textVertexShader, textFragShader);
 
+		// Buffers
 		glCreateBuffers(1, &VBO);
 		glNamedBufferStorage(VBO, maxQuads * 6 * sizeof(TextVertex), nullptr, GL_DYNAMIC_STORAGE_BIT);
 
 		glCreateBuffers(1, &SSBO);
 		glNamedBufferStorage(SSBO, sizeof(PerDrawTextData), nullptr, GL_DYNAMIC_STORAGE_BIT);
-		glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, SSBO);
+		glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, SSBO); // Index 1 here as index 0 is for unlit
 
 		glCreateVertexArrays(1, &VAO);
 		glEnableVertexArrayAttrib(VAO, 0);
 		glVertexArrayAttribFormat(VAO, 0, 2, GL_FLOAT, GL_FALSE, offsetof(TextVertex, position));
+
 		glVertexArrayAttribBinding(VAO, 0, 0);
 
 		glEnableVertexArrayAttrib(VAO, 1);
@@ -241,19 +230,83 @@ struct TextRenderer
 		glVertexArrayAttribFormat(VAO, 2, 4, GL_FLOAT, GL_FALSE, offsetof(TextVertex, color));
 		glVertexArrayAttribBinding(VAO, 2, 0);
 
+		glEnableVertexArrayAttrib(VAO, 3);
+		glVertexArrayAttribIFormat(VAO, 3, 1, GL_UNSIGNED_INT, offsetof(TextVertex, atlasIndex));
+		glVertexArrayAttribBinding(VAO, 3, 0);
+
 		glVertexArrayVertexBuffer(VAO, 0, VBO, 0, sizeof(TextVertex));
+
+		frameVerts.reserve(maxQuads * 6);
+		fonts.reserve(cMaxFontAtlases);
 
 		return true;
 	}
 
+	int RegisterFont(const char* fontPath, float pixelSize)
+	{
+		if (fonts.size() >= cMaxFontAtlases)
+		{
+			std::cerr << "RegisterFont: MAX_FONT_ATLASES (" << cMaxFontAtlases << ") reached.\n";
+			return -1;
+		}
+
+		std::ifstream file(fontPath, std::ios::binary | std::ios::ate);
+		if (!file)
+		{
+			std::cerr << "Failed to open font file: " << fontPath << std::endl;
+			return -1;
+		}
+
+		std::streamsize size = file.tellg();
+		file.seekg(0, std::ios::beg);
+		std::vector<unsigned char> ttfBuffer((size_t)size);
+		if (!file.read(reinterpret_cast<char*>(ttfBuffer.data()), size))
+		{
+			std::cerr << "Failed to read font: " << fontPath << std::endl;
+			return -1;
+		}
+
+		FontAtlas atlas;
+		atlas.fontSize = pixelSize;
+
+		std::vector<unsigned char> bitmap((size_t)atlas.atlasWidth * atlas.atlasHeight);
+		stbtt_pack_context packCtx;
+		if (!stbtt_PackBegin(&packCtx, bitmap.data(), atlas.atlasWidth, atlas.atlasHeight, 0, 1, nullptr))
+		{
+			std::cerr << "STB TTF pack begin failed.\n";
+			return -1;
+		}
+		stbtt_PackSetOversampling(&packCtx, 2, 2);
+		stbtt_PackFontRange(&packCtx, ttfBuffer.data(), 0, atlas.fontSize, 32, 96, atlas.charData);
+		stbtt_PackEnd(&packCtx);
+
+		// Upload atlas to GPU
+		glCreateTextures(GL_TEXTURE_2D, 1, &atlas.texture);
+		glTextureStorage2D(atlas.texture, 1, GL_R8, atlas.atlasWidth, atlas.atlasHeight);
+		glTextureSubImage2D(atlas.texture, 0, 0, 0, atlas.atlasWidth, atlas.atlasHeight, GL_RED, GL_UNSIGNED_BYTE, bitmap.data());
+		glTextureParameteri(atlas.texture, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTextureParameteri(atlas.texture, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTextureParameteri(atlas.texture, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTextureParameteri(atlas.texture, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		// Get handle
+		atlas.textureHandle = glGetTextureHandleARB(atlas.texture);
+		glMakeTextureHandleResidentARB(atlas.textureHandle);
+
+		fonts.push_back(atlas);
+		return (int)fonts.size() - 1;
+	}
+
 	void Destroy()
 	{
-		glMakeTextureHandleNonResidentARB(textureHandle);
+		for (FontAtlas& atlas : fonts)
+		{
+			glMakeTextureHandleNonResidentARB(atlas.textureHandle);
+			glDeleteTextures(1, &atlas.texture);
+		}
 		glDeleteProgram(program);
 		glDeleteVertexArrays(1, &VAO);
 		glDeleteBuffers(1, &VBO);
 		glDeleteBuffers(1, &SSBO);
-		glDeleteTextures(1, &texture);
 	}
 
 	void BeginFrame(int screenWidth, int screenHeight)
@@ -262,8 +315,14 @@ struct TextRenderer
 		frameProj = glm::ortho(0.0f, (float)screenWidth, (float)screenHeight, 0.0f, -1.0f, 1.0f);
 	}
 
-	void RenderText(const std::string& text, float x, float y, const glm::vec3& color)
+	void RenderText(const std::string& text, float& x, float& y, const glm::vec3& color, int fontIndex = 0)
 	{
+		if (fontIndex < 0 || fontIndex >= (int)fonts.size())
+		{
+			std::cerr << "RenderText: invalid fontIndex " << fontIndex << "\n";
+			return;
+		}
+		FontAtlas& atlas = fonts[fontIndex];
 		glm::vec4 col(color, 1.0f);
 
 		for (char c : text)
@@ -271,15 +330,24 @@ struct TextRenderer
 			if (c < 32 || c >= 128) continue;
 
 			stbtt_aligned_quad quad;
-			stbtt_GetPackedQuad(charData, atlasWidth, atlasHeight, c - 32, &x, &y, &quad, 1);
+			stbtt_GetPackedQuad(atlas.charData, atlas.atlasWidth, atlas.atlasHeight, c - 32, &x, &y, &quad, 1);
 
-			frameVerts.push_back({ {quad.x0, quad.y0}, {quad.s0, quad.t0}, col });
-			frameVerts.push_back({ {quad.x1, quad.y0}, {quad.s1, quad.t0}, col });
-			frameVerts.push_back({ {quad.x1, quad.y1}, {quad.s1, quad.t1}, col });
+			frameVerts.push_back({ {quad.x0, quad.y0}, {quad.s0, quad.t0}, col, (GLuint)fontIndex });
+			frameVerts.push_back({ {quad.x1, quad.y0}, {quad.s1, quad.t0}, col, (GLuint)fontIndex });
+			frameVerts.push_back({ {quad.x1, quad.y1}, {quad.s1, quad.t1}, col, (GLuint)fontIndex });
 
-			frameVerts.push_back({ {quad.x0, quad.y0}, {quad.s0, quad.t0}, col });
-			frameVerts.push_back({ {quad.x1, quad.y1}, {quad.s1, quad.t1}, col });
-			frameVerts.push_back({ {quad.x0, quad.y1}, {quad.s0, quad.t1}, col });
+			frameVerts.push_back({ {quad.x0, quad.y0}, {quad.s0, quad.t0}, col, (GLuint)fontIndex });
+			frameVerts.push_back({ {quad.x1, quad.y1}, {quad.s1, quad.t1}, col, (GLuint)fontIndex });
+			frameVerts.push_back({ {quad.x0, quad.y1}, {quad.s0, quad.t1}, col, (GLuint)fontIndex });
+		}
+	}
+
+	// Renders a sequence of runs on one line
+	void RenderTextSegments(float x, float y, const std::vector<TextSegment>& segments)
+	{
+		for (const TextSegment& seg : segments)
+		{
+			RenderText(seg.text, x, y, seg.color, seg.fontIndex);
 		}
 	}
 
@@ -296,26 +364,32 @@ struct TextRenderer
 			vertCount = maxVerts;
 		}
 
-		// Update VBO
+		// Update VBO with new quad data (text vertex)
 		glNamedBufferSubData(VBO, 0, vertCount * sizeof(TextVertex), frameVerts.data());
 
-		// Update SSBO
+		// Per Draw data
 		PerDrawTextData perDrawData{};
 		perDrawData.proj = frameProj;
-		perDrawData.textureHandle = textureHandle;
+
+		for (size_t i = 0; i < fonts.size() && i < cMaxFontAtlases; ++i)
+		{
+			GLuint64 handle = fonts[i].textureHandle;
+			perDrawData.atlasHandles[i] = handle;
+		}
+		// Update SSBO
 		glNamedBufferSubData(SSBO, 0, sizeof(perDrawData), &perDrawData);
 
-		// Draw
+		// Use text shaders
 		glUseProgram(program);
+		// Enable alpha
 		glEnable(GL_BLEND);
 		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 		glDisable(GL_DEPTH_TEST);
 		glDisable(GL_CULL_FACE);
-
+		// Bind and Draw
 		glBindVertexArray(VAO);
 		glDrawArrays(GL_TRIANGLES, 0, (GLsizei)vertCount);
-
-		// Restore state
+		// Restore Cull and Blend states
 		glEnable(GL_CULL_FACE);
 		glEnable(GL_DEPTH_TEST);
 		glDisable(GL_BLEND);
@@ -365,6 +439,7 @@ int main()
 		return EXIT_FAILURE;
 	}
 
+	glfwGetFramebufferSize(window, &sWidth, &sHeight);
 	glViewport(0, 0, sWidth, sHeight);
 
 	glEnable(GL_DEBUG_OUTPUT);
@@ -444,11 +519,17 @@ int main()
 
 	// Text renderer
 	TextRenderer textRenderer;
-	bool validText = textRenderer.Init("../../../resources/fonts/SpaceGrotesk-Regular.ttf");
+	bool validText = textRenderer.Init();
 	if (!validText)
 	{
 		std::cerr << "Text rendering disabled (font failed to load).\n";
 	}
+	int spaceGroteskRegularIndex = textRenderer.RegisterFont("../../../resources/fonts/SpaceGrotesk-Regular.ttf", 32.0f);
+	int spaceGroteskBoldIndex = textRenderer.RegisterFont("../../../resources/fonts/SpaceGrotesk-Bold.ttf", 32.0f);
+
+	std::cout << "Space Grotesk Regular index is: " << spaceGroteskRegularIndex << std::endl;
+	std::cout << "Space Grotesk Bold index is: " << spaceGroteskBoldIndex << std::endl;
+
 
 	double fpsTimer = glfwGetTime();
 	int frameCount = 0;
@@ -457,6 +538,12 @@ int main()
 	while (!glfwWindowShouldClose(window))
 	{
 		glfwPollEvents();
+
+		if (sWidth == 0 || sHeight == 0)
+		{
+			glfwWaitEvents();
+			continue;
+		}
 
 		double time = glfwGetTime();
 		// FPS calculation
@@ -490,8 +577,15 @@ int main()
 			textRenderer.BeginFrame(sWidth, sHeight);
 
 			std::string fpsText = std::format("FPS: {}", fps);
-			textRenderer.RenderText(fpsText, 10.0f, 30.0f, glm::vec3(1.0f, 1.0f, 1.0f));
-			textRenderer.RenderText("Backend: OpenGL 4.6 AZDO", 10.0f, 60.0f, glm::vec3(1.0f, 0.8f, 0.2f));
+			textRenderer.RenderTextSegments(10.0f, 30.0f, { {fpsText, spaceGroteskRegularIndex, glm::vec3(1.0f)} });
+			textRenderer.RenderTextSegments(10.0f, 60.0f, { {"Backend: OpenGL 4.6 AZDO", spaceGroteskRegularIndex, glm::vec3(1.0f, 0.8f, 0.2f)}});
+
+			textRenderer.RenderTextSegments(10.0f, 90.0f,
+				{
+					{"This is a very ", spaceGroteskRegularIndex, glm::vec3(1.0f)},
+					{"Important", spaceGroteskBoldIndex, glm::vec3(0.0f, 1.0f, 0.0f)},
+					{" Text!", spaceGroteskRegularIndex, glm::vec3(1.0f)}
+				});
 
 			textRenderer.EndFrame();
 		}

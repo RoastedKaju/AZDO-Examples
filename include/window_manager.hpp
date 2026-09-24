@@ -106,7 +106,7 @@ namespace WindowManager
 
 		void SwapBuffers() const { glfwSwapBuffers(pWindow); };
 
-		void DestroyWindow()
+		void Destroy()
 		{
 			glfwDestroyWindow(pWindow);
 			glfwTerminate();
