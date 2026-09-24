@@ -3,27 +3,13 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
-#include <stb_image.h>
+#include <window_manager.hpp>
+#include <file_manager.hpp>
+#include <shader_manager.hpp>
 #include <iostream>
 #include <vector>
 #include <string>
 
-static int sWidth = 800;
-static int sHeight = 600;
-
-void GLAPIENTRY glDebugOutput(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar* message, const void* userParam)
-{
-	// Ignore non-significant error codes
-	if (id == 131169 || id == 131185 || id == 131218 || id == 131204) return;
-	std::cerr << "GL Debug [" << id << "] " << message << '\n';
-}
-
-static void FrameBufferSizeCallback(GLFWwindow* window, int width, int height)
-{
-	sWidth = width;
-	sHeight = height;
-	glViewport(0, 0, width, height);
-}
 
 const char* vertexShaderSource = R"(
 	#version 460 core
@@ -111,69 +97,29 @@ static GLuint CreateShaderProgram()
 	return program;
 }
 
-static bool LoadImage(const char* path, std::vector<char>& outPixels, int& outWidth, int& outHeight)
+struct Vertex
 {
-	int width = 0, height = 0, sourceChannels = 0;
-	unsigned char* data = stbi_load(path, &width, &height, &sourceChannels, 4);
-	if (!data)
-	{
-		std::cerr << "Failed to load image: " << path << " (" << stbi_failure_reason() << ")" << std::endl;
-		return false;
-	}
+	glm::vec3 position;
+	glm::vec2 texCoord;
+};
+// Quad geometry
+Vertex vertices[] = {
+	{ { -1.0f, -1.0f, 0.0f }, { 0.0f, 1.0f } },
+	{ {  1.0f, -1.0f, 0.0f }, { 1.0f, 1.0f } },
+	{ {  1.0f,  1.0f, 0.0f }, { 1.0f, 0.0f } },
+	{ { -1.0f,  1.0f, 0.0f }, { 0.0f, 0.0f } }
+};
 
-	outWidth = width;
-	outHeight = height;
-	outPixels.assign(data, data + (static_cast<size_t>(width) * height * 4));
-
-	stbi_image_free(data);
-	return true;
-}
+GLuint indices[] = {
+	0, 1, 2,
+	2, 3, 0
+};
 
 int main()
 {
-	if (!glfwInit())
-	{
-		return EXIT_FAILURE;
-	}
-	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
-	glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
-	glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-	glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GLFW_TRUE);
-
-	GLFWwindow* window = glfwCreateWindow(sWidth, sHeight, "Textured Quad", nullptr, nullptr);
-	if (!window)
-	{
-		glfwTerminate();
-		return EXIT_FAILURE;
-	}
-	glfwMakeContextCurrent(window);
-	glfwSetFramebufferSizeCallback(window, &FrameBufferSizeCallback);
-
-	int version = gladLoadGL(glfwGetProcAddress);
-	if (!version) return EXIT_FAILURE;
-	// Check extensions
-	if (!GLAD_GL_ARB_bindless_texture)
-	{
-		std::cerr << "GL_ARB_bindless_texture not supported.\n";
-		return EXIT_FAILURE;
-	}
-	if (!GLAD_GL_ARB_gpu_shader_int64)
-	{
-		std::cerr << "GL_ARB_gpu_shader_int64 not supported.\n";
-		return EXIT_FAILURE;
-	}
-
-	printf("Vendor: %s\n", glGetString(GL_VENDOR));
-	printf("Renderer: %s\n", glGetString(GL_RENDERER));
-	printf("Version: %s\n", glGetString(GL_VERSION));
-	printf("GLSL: %s\n", glGetString(GL_SHADING_LANGUAGE_VERSION));
-
-	glfwGetFramebufferSize(window, &sWidth, &sHeight);
-	glViewport(0, 0, sWidth, sHeight);
-
-	glEnable(GL_DEBUG_OUTPUT);
-	glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
-	glDebugMessageCallback(glDebugOutput, nullptr);
+	WindowManager::Window window{};
+	window.CreateWindow("Texture", 800, 600);
+	window.EnableOutputDebug();
 
 	// Depth Testing
 	glEnable(GL_DEPTH_TEST);
@@ -183,24 +129,7 @@ int main()
 	glCullFace(GL_BACK);
 	glFrontFace(GL_CCW);
 
-	struct Vertex
-	{
-		glm::vec3 position;
-		glm::vec2 texCoord;
-	};
-	// Quad geometry
-	Vertex vertices[] = {
-		{ { -1.0f, -1.0f, 0.0f }, { 0.0f, 1.0f } },
-		{ {  1.0f, -1.0f, 0.0f }, { 1.0f, 1.0f } },
-		{ {  1.0f,  1.0f, 0.0f }, { 1.0f, 0.0f } },
-		{ { -1.0f,  1.0f, 0.0f }, { 0.0f, 0.0f } }
-	};
-
-	GLuint indices[] = {
-		0, 1, 2,
-		2, 3, 0
-	};
-
+	// Buffers
 	GLuint VBO, EBO, UBO, SSBO;
 
 	glCreateBuffers(1, &VBO);
@@ -213,9 +142,6 @@ int main()
 	glCreateBuffers(1, &UBO);
 	glNamedBufferStorage(UBO, sizeof(glm::mat4), nullptr, GL_DYNAMIC_STORAGE_BIT);
 	glBindBufferBase(GL_UNIFORM_BUFFER, 0, UBO);
-	// Using bind range becomes useful when one large buffer contains multiple objects' data.
-	// Binding base will make shader accesses the whole buffer starting at offset 0.
-	//glBindBufferRange(GL_UNIFORM_BUFFER, 0, UBO, 0, sizeof(glm::mat4));
 	
 	// For per object data
 	glCreateBuffers(1, &SSBO);
@@ -240,22 +166,19 @@ int main()
 	GLuint shaderProgram = CreateShaderProgram();
 
 	// Load image from file
-	std::vector<char> pixels;
-	int width;
-	int height;
-	if (!LoadImage("../../../resources/textures/uv_tiles.png", pixels, width, height))
+	ImageData image{};
+	if (!FileManager::ReadImageFile("../../../resources/textures/uv_tiles.png", image, false))
 	{
-		glfwDestroyWindow(window);
-		glfwTerminate();
 		return EXIT_FAILURE;
 	}
+
 	// Create texture
 	GLuint debugTexture;
 	// Calculate required mipmap levels dynamically
-	GLsizei levels = static_cast<GLsizei>(std::floor(std::log2(std::max(width, height)))) + 1;
+	GLsizei levels = static_cast<GLsizei>(std::floor(std::log2(std::max(image.width, image.height)))) + 1;
 	glCreateTextures(GL_TEXTURE_2D, 1, &debugTexture);
-	glTextureStorage2D(debugTexture, levels, GL_RGBA8, width, height);
-	glTextureSubImage2D(debugTexture, 0, 0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+	glTextureStorage2D(debugTexture, levels, GL_RGBA8, image.width, image.height);
+	glTextureSubImage2D(debugTexture, 0, 0, 0, image.width, image.height, GL_RGBA, GL_UNSIGNED_BYTE, image.pixels.data());
 	// Enable mipmapping and filtering
 	glGenerateTextureMipmap(debugTexture);
 	glTextureParameteri(debugTexture, GL_TEXTURE_WRAP_S, GL_REPEAT);
@@ -269,22 +192,23 @@ int main()
 	// Upload texture handle to SSBO once
 	glNamedBufferSubData(SSBO, 0, sizeof(GLuint64), &textureHandle);
 
-	while (!glfwWindowShouldClose(window))
+	while (!window.ShouldClose())
 	{
-		glfwPollEvents();
-
-		if (sWidth == 0 || sHeight == 0)
+		if (!window.ProcessEvents())
 		{
-			glfwWaitEvents();
 			continue;
 		}
 
 		float time = (float)glfwGetTime();
+
+
 		float cameraZ = std::sin(time) + 2.5f;
+
+		const auto windowSize = window.GetSize();
 
 		glm::mat4 model = glm::mat4(1.0f);
 		glm::mat4 view = glm::lookAt(glm::vec3(0.0f, 0.0f, cameraZ), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-		glm::mat4 proj = glm::perspective(glm::radians(45.0f), (float)sWidth / (float)sHeight, 0.1f, 100.0f);
+		glm::mat4 proj = glm::perspective(glm::radians(45.0f), (float)windowSize.width / (float)windowSize.height, 0.1f, 100.0f);
 		glm::mat4 mvp = proj * view * model;
 
 		// Upload MVP per frame to UBO
@@ -297,7 +221,7 @@ int main()
 		glBindVertexArray(VAO);
 		glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr);
 
-		glfwSwapBuffers(window);
+		window.SwapBuffers();
 	}
 
 	glMakeTextureHandleNonResidentARB(textureHandle);
@@ -308,6 +232,8 @@ int main()
 	glDeleteBuffers(1, &EBO);
 	glDeleteBuffers(1, &UBO);
 	glDeleteBuffers(1, &SSBO);
-	glfwDestroyWindow(window);
-	glfwTerminate();
+
+	window.DestroyWindow();
+
+	return EXIT_SUCCESS;
 }

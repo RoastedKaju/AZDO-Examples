@@ -1,10 +1,9 @@
 #include <glad/gl.h>
-#include <GLFW/glfw3.h>
+#include <glfw/glfw3.h>
 #include <glm/glm.hpp>
 #include <file_manager.hpp>
 #include <shader_manager.hpp>
 #include <window_manager.hpp>
-#include <iostream>
 
 // Triangle vertex structure and data
 struct Vertex
@@ -25,6 +24,8 @@ int main()
 	WindowManager::Window window{};
 	window.CreateWindow("Triangle", 800, 600);
 	window.EnableOutputDebug();
+
+	FileManager::LoadGlTF("../../../resources/models/ibex.glb");
 
 	// Create VBO with DSA
 	GLuint VBO;
@@ -58,7 +59,7 @@ int main()
 
 	while (!window.ShouldClose())
 	{
-		if (!window.PollEvents())
+		if (!window.ProcessEvents())
 		{
 			continue;
 		}
@@ -77,6 +78,7 @@ int main()
 	glDeleteProgram(shaderProgram);
 	glDeleteVertexArrays(1, &VAO);
 	glDeleteBuffers(1, &VBO);
+
 	window.DestroyWindow();
 
 	return EXIT_SUCCESS;
