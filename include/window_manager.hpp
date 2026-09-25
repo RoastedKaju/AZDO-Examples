@@ -12,7 +12,7 @@ namespace WindowManager
 	class Window
 	{
 	public:
-		bool CreateWindow(const char* inTitle, int inWidth, int inHeight)
+		bool Create(const char* inTitle, int inWidth, int inHeight)
 		{
 			mWidth = inWidth;
 			mHeight = inHeight;
@@ -113,7 +113,7 @@ namespace WindowManager
 		}
 
 		// Getters
-		GLFWwindow* GetWindow() const { return pWindow; }
+		GLFWwindow* GetHandle() const { return pWindow; }
 		Extent2D GetSize() const { return { mWidth, mHeight }; }
 
 		// Setters

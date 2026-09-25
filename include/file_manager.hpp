@@ -30,7 +30,7 @@ namespace FileManager
 		return contents;
 	}
 
-	static inline bool ReadImageFile(const char* inPath, ImageData& outImageData, const GLuint inDesiredChannels = 4, bool doFlipVertically = false)
+	static inline bool ReadImageFile(const char* inPath, ImageData& outImageData, const GLuint inDesiredChannels = 0, bool doFlipVertically = false)
 	{
 		if (!std::filesystem::exists(inPath))
 		{
@@ -42,7 +42,7 @@ namespace FileManager
 
 		int width = 0;
 		int height = 0;
-		int channels = inDesiredChannels;
+		int channels = 0;
 		void* loadedData = nullptr;
 		ImageData::Type type{};
 
@@ -70,6 +70,8 @@ namespace FileManager
 			return false;
 		}
 
+		const int actualChannels = inDesiredChannels == 0 ? channels : static_cast<int>(inDesiredChannels);
+
 		if (width <= 0 || height <= 0 || channels < 1 || channels > 4)
 		{
 			std::cerr << "Invalid components in Image: " << inPath << std::endl;
@@ -79,14 +81,14 @@ namespace FileManager
 
 		const size_t bytesPerComponent = type == ImageData::Type::eUInt8 ? 1 : type == ImageData::Type::eUInt16 ? 2 : 4;
 		const size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
-		const size_t byteCount = pixelCount * static_cast<size_t>(inDesiredChannels) * bytesPerComponent;
+		const size_t byteCount = pixelCount * static_cast<size_t>(actualChannels) * bytesPerComponent;
 
 		ImageData result
 		{
 			.type = type,
 			.width = width,
 			.height = height,
-			.channels = static_cast<int>(inDesiredChannels)
+			.channels = actualChannels
 		};
 		result.pixels.resize(byteCount);
 
@@ -98,7 +100,7 @@ namespace FileManager
 		return true;
 	}
 
-	static inline bool ReadImageMemory(std::span<const std::uint8_t> encodedBytes, ImageData& outImageData, const GLuint inDesiredChannels = 4, bool doFlipVertically = false)
+	static inline bool ReadImageMemory(std::span<const std::uint8_t> encodedBytes, ImageData& outImageData, const GLuint inDesiredChannels = 0, bool doFlipVertically = false)
 	{
 		if (encodedBytes.empty() || encodedBytes.size() > static_cast<size_t>(std::numeric_limits<int>::max()))
 		{
@@ -139,6 +141,8 @@ namespace FileManager
 			return false;
 		}
 
+		const int actualChannels = inDesiredChannels == 0 ? channels : static_cast<int>(inDesiredChannels);
+
 		if (width <= 0 || height <= 0 || channels < 1 || channels > 4)
 		{
 			stbi_image_free(loadedData);
@@ -146,14 +150,14 @@ namespace FileManager
 		}
 
 		const size_t bytesPerComponent = type == ImageData::Type::eUInt8 ? 1 : type == ImageData::Type::eUInt16 ? 2 : 4;
-		const size_t byteCount = static_cast<size_t>(width) * static_cast<size_t>(height) * static_cast<size_t>(inDesiredChannels) * bytesPerComponent;
+		const size_t byteCount = static_cast<size_t>(width) * static_cast<size_t>(height) * static_cast<size_t>(actualChannels) * bytesPerComponent;
 
 		ImageData result
 		{
 			.type = type,
 			.width = width,
 			.height = height,
-			.channels = static_cast<int>(inDesiredChannels)
+			.channels = actualChannels
 		};
 		result.pixels.resize(byteCount);
 		std::memcpy(result.pixels.data(), loadedData, byteCount);

@@ -51,7 +51,7 @@ struct FrameData
 int main()
 {
 	WindowManager::Window window{};
-	window.CreateWindow("Mesh", 800, 600);
+	window.Create("Mesh", 800, 600);
 	window.EnableOutputDebug();
 
 	glEnable(GL_DEPTH_TEST);

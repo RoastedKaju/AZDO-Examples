@@ -8,18 +8,83 @@ namespace GlDevice
 {
 	static inline GLuint UploadImageToGPU(const ImageData& inImage)
 	{
-		GLuint textureID;
+		GLenum internalFormat = 0;
+		GLenum format = 0;
+
+		// select formats
+		switch (inImage.channels)
+		{
+		case 1:
+			format = GL_RED;
+			switch (inImage.type)
+			{
+			case ImageData::Type::eUInt8:   internalFormat = GL_R8; break;
+			case ImageData::Type::eUInt16:  internalFormat = GL_R16; break;
+			case ImageData::Type::eFloat32: internalFormat = GL_R32F; break;
+			}
+			break;
+
+		case 2:
+			format = GL_RG;
+			switch (inImage.type)
+			{
+			case ImageData::Type::eUInt8:   internalFormat = GL_RG8; break;
+			case ImageData::Type::eUInt16:  internalFormat = GL_RG16; break;
+			case ImageData::Type::eFloat32: internalFormat = GL_RG32F; break;
+			}
+			break;
+
+		case 3:
+			format = GL_RGB;
+			switch (inImage.type)
+			{
+			case ImageData::Type::eUInt8:   internalFormat = GL_RGB8; break;
+			case ImageData::Type::eUInt16:  internalFormat = GL_RGB16; break;
+			case ImageData::Type::eFloat32: internalFormat = GL_RGB32F; break;
+			}
+			break;
+
+		case 4:
+			format = GL_RGBA;
+			switch (inImage.type)
+			{
+			case ImageData::Type::eUInt8:   internalFormat = GL_RGBA8; break;
+			case ImageData::Type::eUInt16:  internalFormat = GL_RGBA16; break;
+			case ImageData::Type::eFloat32: internalFormat = GL_RGBA32F; break;
+			}
+			break;
+
+		default:
+			std::cerr << "Unsupported channel count: " << inImage.channels << std::endl;
+			return 0;
+		}
+
+		// select data type
+		GLenum dataType = GL_UNSIGNED_BYTE;
+		switch (inImage.type)
+		{
+		case ImageData::Type::eUInt8:   dataType = GL_UNSIGNED_BYTE; break;
+		case ImageData::Type::eUInt16:  dataType = GL_UNSIGNED_SHORT; break;
+		case ImageData::Type::eFloat32: dataType = GL_FLOAT; break;
+		}
+
+		glPixelStorei(GL_UNPACK_ALIGNMENT, (inImage.channels == 1 || inImage.channels == 3) ? 1 : 4);
+
+		GLuint textureID = 0;
 		GLsizei levels = static_cast<GLsizei>(std::floor(std::log2(std::max(inImage.width, inImage.height)))) + 1;
 
 		glCreateTextures(GL_TEXTURE_2D, 1, &textureID);
-		glTextureStorage2D(textureID, levels, GL_RGBA8, inImage.width, inImage.height);
-		glTextureSubImage2D(textureID, 0, 0, 0, inImage.width, inImage.height, GL_RGBA, GL_UNSIGNED_BYTE, inImage.pixels.data());
+		glTextureStorage2D(textureID, levels, internalFormat, inImage.width, inImage.height);
+		glTextureSubImage2D(textureID, 0, 0, 0, inImage.width, inImage.height, format, dataType, inImage.pixels.data());
 
 		glGenerateTextureMipmap(textureID);
 		glTextureParameteri(textureID, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
 		glTextureParameteri(textureID, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 		glTextureParameteri(textureID, GL_TEXTURE_WRAP_S, GL_REPEAT);
 		glTextureParameteri(textureID, GL_TEXTURE_WRAP_T, GL_REPEAT);
+
+		// Reset pixel alignment state to default
+		glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
 
 		return textureID;
 	}

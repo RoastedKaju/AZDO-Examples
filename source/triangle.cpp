@@ -22,7 +22,7 @@ int main()
 {
 	// Create window
 	WindowManager::Window window{};
-	window.CreateWindow("Triangle", 800, 600);
+	window.Create("Triangle", 800, 600);
 	window.EnableOutputDebug();
 
 	// Create VBO with DSA

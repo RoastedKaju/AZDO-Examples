@@ -32,7 +32,7 @@ GLuint indices[] = {
 int main()
 {
 	WindowManager::Window window{};
-	window.CreateWindow("Texture", 800, 600);
+	window.Create("Texture", 800, 600);
 	window.EnableOutputDebug();
 
 	// Depth Testing

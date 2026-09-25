@@ -45,14 +45,14 @@ int main()
 {
 	// create window
 	WindowManager::Window window{};
-	window.CreateWindow("Importer", 800, 600);
+	window.Create("Importer", 800, 600);
 	window.EnableOutputDebug();
 
 	GlDevice::DefaultTextureSet defaultTextureSet{};
 	defaultTextureSet.Initialize();
 
 	// load model
-	if (!GlTFImporter::LoadGlTF("../../../resources/models/heather.glb", modelData))
+	if (!GlTFImporter::LoadGlTF("../../../resources/animations/adventurer.glb", modelData))
 	{
 		return EXIT_FAILURE;
 	}
@@ -157,16 +157,6 @@ int main()
 		return EXIT_FAILURE;
 	}
 
-	// normalize model scale
-	//glm::vec3 sceneMin(FLT_MAX), sceneMax(-FLT_MAX);
-	//float maxExtent = glm::compMax(sceneMax - sceneMin);
-	//float scaleFactor = 2.0f / maxExtent; // Fit within 2-unit box
-
-	//for (Instance& instance : instances)
-	//{
-	//	instance.world = glm::scale(glm::mat4(1.0f), glm::vec3(scaleFactor)) * instance.world;
-	//}
-
 	GLuint vao = 0, vbo = 0, ebo = 0, ubo = 0;
 	glCreateVertexArrays(1, &vao);
 
@@ -221,7 +211,6 @@ int main()
 		for (const Instance& instance : instances)
 		{
 			glm::mat4 model = instance.world;
-			model = glm::scale(model, glm::vec3(100));
 			PerFrameData matrices{ model, view, projection, instance.draw.baseColorHandle };
 			glNamedBufferSubData(ubo, 0, sizeof(PerFrameData), &matrices);
 			glDrawElementsBaseVertex(GL_TRIANGLES, instance.draw.indexCount, GL_UNSIGNED_INT, reinterpret_cast<const void*>(static_cast<uintptr_t>(instance.draw.firstIndex) * sizeof(uint32_t)), instance.draw.baseVertex);

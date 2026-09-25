@@ -6,123 +6,58 @@
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
-#include <iostream>
-
-static int sWidth = 800;
-static int sHeight = 600;
+#include <window_manager.hpp>
+#include <file_manager.hpp>
+#include <shader_manager.hpp>
 
 static bool sDrawWireFrame = true;
 static float sWireFrameColor[3] = { 0.0f, 0.0f, 0.0f };
 
-void GLAPIENTRY glDebugOutput(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar* message, const void* userParam)
+// Vertex
+struct Vertex
 {
-	// Ignore non-significant error codes
-	if (id == 131169 || id == 131185 || id == 131218 || id == 131204) return;
-	std::cerr << "GL Debug [" << id << "] " << message << '\n';
-}
+	glm::vec3 position;
+	glm::vec3 color;
+};
 
-static void FrameBufferSizeCallback(GLFWwindow* window, int width, int height)
+Vertex vertices[] = {
+	{ { -0.5f, -0.5f,  0.5f }, { 0.5f, 0.0f, 0.0f } }, // 0: Bottom-Left-Front
+	{ {  0.5f, -0.5f,  0.5f }, { 0.0f, 1.0f, 0.0f } }, // 1: Bottom-Right-Front
+	{ {  0.5f,  0.5f,  0.5f }, { 0.0f, 0.0f, 1.0f } }, // 2: Top-Right-Front
+	{ { -0.5f,  0.5f,  0.5f }, { 1.0f, 0.5f, 0.0f } }, // 3: Top-Left-Front
+	{ { -0.5f, -0.5f, -0.5f }, { 1.0f, 0.0f, 1.0f } }, // 4: Bottom-Left-Back
+	{ {  0.5f, -0.5f, -0.5f }, { 0.0f, 0.5f, 1.0f } }, // 5: Bottom-Right-Back
+	{ {  0.5f,  0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f } }, // 6: Top-Right-Back
+	{ { -0.5f,  0.5f, -0.5f }, { 1.0f, 1.0f, 0.0f } }  // 7: Top-Left-Back
+};
+
+GLuint indices[] = {
+	// Front
+	0, 1, 2,  2, 3, 0,
+	// Right
+	1, 5, 6,  6, 2, 1,
+	// Back
+	5, 4, 7,  7, 6, 5,
+	// Left
+	4, 0, 3,  3, 7, 4,
+	// Top
+	3, 2, 6,  6, 7, 3,
+	// Bottom
+	4, 5, 1,  1, 0, 4
+};
+
+// Per-Frame Data Must match with shader
+struct FrameData
 {
-	sWidth = width;
-	sHeight = height;
-	glViewport(0, 0, width, height);
-}
-
-const char* vertexShaderSource = R"(
-	#version 460 core
-	layout (location = 0) in vec3 aPos;
-	layout (location = 1) in vec3 aColor;
-
-	layout (location = 0) out vec3 vColor;
-
-	layout (std140, binding = 0)
-	uniform FrameData{
-		mat4 mvp;
-		bool showWireframe;
-	} frameData;
-
-	void main() {
-		vColor = aColor;
-		gl_Position = frameData.mvp * vec4(aPos, 1.0);
-	}
-)";
-
-const char* fragmentShaderSource = R"(
-	#version 460 core
-	layout (location = 0) in vec3 vColor;
-	layout (location = 0) out vec4 FragColor;
-
-	layout (std140, binding = 0)
-	uniform FrameData{
-		mat4 mvp;
-		bool showWireframe;
-	} frameData;
-
-	layout(std430, binding = 0)
-	buffer ObjectData {
-		vec3 wireframeColor;
-	} objectData;
-
-	void main() {
-		if(frameData.showWireframe) {
-			FragColor = vec4(objectData.wireframeColor, 1.0);
-		} else {
-			FragColor = vec4(vColor, 1.0);
-		}
-	}
-)";
-
-static GLuint CreateShaderProgram()
-{
-	GLuint vs = glCreateShader(GL_VERTEX_SHADER);
-	glShaderSource(vs, 1, &vertexShaderSource, nullptr);
-	glCompileShader(vs);
-
-	GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
-	glShaderSource(fs, 1, &fragmentShaderSource, nullptr);
-	glCompileShader(fs);
-
-	GLuint program = glCreateProgram();
-	glAttachShader(program, vs);
-	glAttachShader(program, fs);
-	glLinkProgram(program);
-
-	glDeleteShader(vs);
-	glDeleteShader(fs);
-	return program;
-}
+	glm::mat4 mvp;
+	GLuint showWireframe; // Since shader uses std140, use 4 bytes for a boolean value
+};
 
 int main()
 {
-	if (!glfwInit())
-	{
-		return EXIT_FAILURE;
-	}
-
-	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
-	glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
-	glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-	glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GLFW_TRUE);
-
-	GLFWwindow* window = glfwCreateWindow(sWidth, sHeight, "ImGUI", nullptr, nullptr);
-	if (!window)
-	{
-		glfwTerminate();
-		return EXIT_FAILURE;
-	}
-	glfwMakeContextCurrent(window);
-	glfwSwapInterval(1);
-	glfwSetFramebufferSizeCallback(window, &FrameBufferSizeCallback);
-
-	int version = gladLoadGL(glfwGetProcAddress);
-	if (!version) return EXIT_FAILURE;
-
-	glfwGetFramebufferSize(window, &sWidth, &sHeight);
-	glViewport(0, 0, sWidth, sHeight);
-
-	glEnable(GL_DEBUG_OUTPUT);
-	glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
-	glDebugMessageCallback(glDebugOutput, nullptr);
+	WindowManager::Window window{};
+	window.Create("ImGUI", 800, 600);
+	window.EnableOutputDebug();
 
 	// Enable depth testing
 	glEnable(GL_DEPTH_TEST);
@@ -131,46 +66,6 @@ int main()
 	glEnable(GL_CULL_FACE);
 	glCullFace(GL_BACK);
 	glFrontFace(GL_CCW);
-
-	// Per-Frame Data Must match with shader
-	struct FrameData
-	{
-		glm::mat4 mvp;
-		GLuint showWireframe; // Since shader uses std140, use 4 bytes for a boolean value
-	};
-
-	// Vertex
-	struct Vertex
-	{
-		glm::vec3 position;
-		glm::vec3 color;
-	};
-
-	Vertex vertices[] = {
-		{ { -0.5f, -0.5f,  0.5f }, { 0.5f, 0.0f, 0.0f } }, // 0: Bottom-Left-Front
-		{ {  0.5f, -0.5f,  0.5f }, { 0.0f, 1.0f, 0.0f } }, // 1: Bottom-Right-Front
-		{ {  0.5f,  0.5f,  0.5f }, { 0.0f, 0.0f, 1.0f } }, // 2: Top-Right-Front
-		{ { -0.5f,  0.5f,  0.5f }, { 1.0f, 0.5f, 0.0f } }, // 3: Top-Left-Front
-		{ { -0.5f, -0.5f, -0.5f }, { 1.0f, 0.0f, 1.0f } }, // 4: Bottom-Left-Back
-		{ {  0.5f, -0.5f, -0.5f }, { 0.0f, 0.5f, 1.0f } }, // 5: Bottom-Right-Back
-		{ {  0.5f,  0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f } }, // 6: Top-Right-Back
-		{ { -0.5f,  0.5f, -0.5f }, { 1.0f, 1.0f, 0.0f } }  // 7: Top-Left-Back
-	};
-
-	GLuint indices[] = {
-		// Front
-		0, 1, 2,  2, 3, 0,
-		// Right
-		1, 5, 6,  6, 2, 1,
-		// Back
-		5, 4, 7,  7, 6, 5,
-		// Left
-		4, 0, 3,  3, 7, 4,
-		// Top
-		3, 2, 6,  6, 7, 3,
-		// Bottom
-		4, 5, 1,  1, 0, 4
-	};
 
 	// DSA buffers
 	GLuint VBO, EBO, UBO, SSBO;
@@ -204,31 +99,36 @@ int main()
 	glVertexArrayVertexBuffer(VAO, 0, VBO, 0, sizeof(Vertex)); // attach VBO to VAO
 	glVertexArrayElementBuffer(VAO, EBO); // attach EBO to VAO
 
-	GLuint shaderProgram = CreateShaderProgram();
+	// load shaders
+	const std::string vs = FileManager::ReadTextFile("../../../resources/shaders/imgui/vertex.glsl");
+	const std::string fs = FileManager::ReadTextFile("../../../resources/shaders/imgui/fragment.glsl");
+	GLuint shaderProgram = ShaderManager::CreateShaderProgram(vs, fs);
+	if (!shaderProgram)
+	{
+		return EXIT_FAILURE;
+	}
 
 	IMGUI_CHECKVERSION();
 	ImGui::CreateContext();
 	ImGuiIO& io = ImGui::GetIO();
 	io.ConfigFlags |= ImGuiConfigFlags_DockingEnable; // Enable docking
 	io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
-	ImGui_ImplGlfw_InitForOpenGL(window, true);
+	ImGui_ImplGlfw_InitForOpenGL(window.GetHandle(), true);
 	ImGui_ImplOpenGL3_Init("#version 460");
 
-	while (!glfwWindowShouldClose(window))
+	while (!window.ShouldClose())
 	{
-		glfwPollEvents();
-
-		if (sWidth == 0 || sHeight == 0)
+		if (!window.ProcessEvents())
 		{
-			glfwWaitEvents();
 			continue;
 		}
 
 		float time = (float)glfwGetTime();
 
+		const Extent2D windowSize = window.GetSize();
 		glm::mat4 model = glm::rotate(glm::mat4(1.0f), time * glm::radians(50.0f), glm::vec3(0.5f, 1.0f, 0.0f));
 		glm::mat4 view = glm::lookAt(glm::vec3(0.0f, 0.0f, 3.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-		glm::mat4 proj = glm::perspective(glm::radians(45.0f), (float)sWidth / (float)sHeight, 0.1f, 100.0f);
+		glm::mat4 proj = glm::perspective(glm::radians(45.0f), (float)windowSize.width / (float)windowSize.height, 0.1f, 100.0f);
 		glm::mat4 mvp = proj * view * model;
 
 		// Push Frame-Data to UBO
@@ -287,10 +187,10 @@ int main()
 			// This is needed because when you drag the windows out of ImGUI dynamically creates OS-level windows
 			ImGui::UpdatePlatformWindows();
 			ImGui::RenderPlatformWindowsDefault();
-			glfwMakeContextCurrent(window); // Restore the context back to GLFW window
+			glfwMakeContextCurrent(window.GetHandle()); // Restore the context back to GLFW window
 		}
 
-		glfwSwapBuffers(window);
+		window.SwapBuffers();
 	}
 
 	ImGui_ImplOpenGL3_Shutdown();
@@ -303,7 +203,7 @@ int main()
 	glDeleteBuffers(1, &EBO);
 	glDeleteBuffers(1, &UBO);
 	glDeleteBuffers(1, &SSBO);
-	glfwDestroyWindow(window);
-	glfwTerminate();
+
+	window.Destroy();
 	return EXIT_SUCCESS;
 }
