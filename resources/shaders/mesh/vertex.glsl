@@ -6,7 +6,7 @@ layout (location = 1) in vec3 aColor;
 layout (location = 0) out vec3 vColor;
 
 layout (std140, binding = 0)
-readonly uniform FrameData
+uniform FrameData
 {
 	mat4 MVP;
 	vec4 wireframeColor;

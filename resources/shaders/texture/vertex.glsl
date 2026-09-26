@@ -6,7 +6,7 @@ layout (location = 1) in vec2 aTexCoord;
 layout (location = 0) out vec2 vTexCoord;
 
 layout (std140, binding = 0)
-readonly uniform FrameData
+uniform FrameData
 {
 	mat4 uMVP;
 };

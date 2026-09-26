@@ -1,7 +1,7 @@
 ﻿cmake_minimum_required(VERSION 3.24)
 project("AZDO")
 
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -16,14 +16,15 @@ add_subdirectory("external/glad")
 add_subdirectory("external/stb")
 add_subdirectory("external/tinyglTF")
 add_subdirectory("external/imgui")
-add_subdirectory("external/slang")
+# add_subdirectory("external/slang")
+add_subdirectory("external/okaraGlTF")
 
 function(example NAME SOURCE)
 	add_executable (${NAME})
 	target_sources(${NAME} PRIVATE ${SOURCE})
 	target_include_directories(${NAME} PRIVATE "include")
 	target_compile_definitions(${NAME} PRIVATE GLFW_INCLUDE_NONE)
-	target_link_libraries(${NAME} PRIVATE glfw glm::glm glad stb tinyglTF imgui slang)
+	target_link_libraries(${NAME} PRIVATE glfw glm::glm glad stb tinyglTF imgui okaraGlTF)
 endfunction()
 
 example(Triangle "source/triangle.cpp")
