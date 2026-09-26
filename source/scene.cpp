@@ -21,6 +21,7 @@ extern "C"
 struct Vertex
 {
     glm::vec3 position;
+    glm::vec2 tex_coord;
 };
 
 struct PerFrameData
@@ -40,6 +41,7 @@ int main()
 
     glEnable(GL_DEPTH_TEST);
 
+    // load mesh data
     Okara::GlTF::Loader loader{};
     loader.load("../../../resources/models/skull.glb");
 
@@ -47,7 +49,9 @@ int main()
     for (size_t i = 0; i < loader.primitive_.vertices.size(); ++i)
     {
         const auto vertex = loader.primitive_.vertices[i];
-        vertices.push_back({{vertex.position.x, vertex.position.y, vertex.position.z}});
+        const glm::vec3 pos = {vertex.position.x, vertex.position.y, vertex.position.z};
+        const glm::vec2 uv = {vertex.uv.x, vertex.uv.y};
+        vertices.push_back({pos, uv});
     }
 
     indices.reserve(loader.primitive_.indices.size());
@@ -57,7 +61,23 @@ int main()
         indices.push_back(index);
     }
 
+    const Okara::GlTF::Material &mat = loader.materials_[loader.primitive_.material];
+    const Okara::GlTF::Texture &base_col_tex = loader.textures_[mat.base_color_texture];
+    const Okara::GlTF::Image &src_img = loader.images_[base_col_tex.source];
+    const Okara::GlTF::BufferView &bv = loader.buffer_views_[src_img.buffer_view];
+
+    int w, h, c;
+    unsigned char *pixels = stbi_load_from_memory((const unsigned char *)src_img.data.data(), src_img.data.size(), &w, &h, &c, 4);
+    if (!pixels)
+    {
+        std::cout << "Failed to load image data.\n";
+        return EXIT_FAILURE;
+    }
+
+    // create buffers and upload mesh data to GPU
     GLuint vao, vbo, ebo, ubo;
+    GLuint base_col_tex_id;
+    GLuint64 base_col_handle;
 
     glCreateBuffers(1, &vbo);
     glNamedBufferStorage(vbo, vertices.size() * sizeof(Vertex), vertices.data(), 0);
@@ -75,8 +95,27 @@ int main()
     glVertexArrayAttribFormat(vao, 0, 3, GL_FLOAT, GL_FALSE, offsetof(Vertex, position));
     glVertexArrayAttribBinding(vao, 0, 0);
 
+    glEnableVertexArrayAttrib(vao, 1);
+    glVertexArrayAttribFormat(vao, 1, 2, GL_FLOAT, GL_FALSE, offsetof(Vertex, tex_coord));
+    glVertexArrayAttribBinding(vao, 1, 0);
+
     glVertexArrayVertexBuffer(vao, 0, vbo, 0, sizeof(Vertex));
     glVertexArrayElementBuffer(vao, ebo);
+
+    GLsizei levels = static_cast<GLsizei>(std::floor(std::log2(std::max(w, h)))) + 1;
+    glCreateTextures(GL_TEXTURE_2D, 1, &base_col_tex_id);
+    glTextureStorage2D(base_col_tex_id, levels, GL_RGBA8, w, h);
+    glTextureSubImage2D(base_col_tex_id, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    glGenerateTextureMipmap(base_col_tex_id);
+    glTextureParameteri(base_col_tex_id, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTextureParameteri(base_col_tex_id, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTextureParameteri(base_col_tex_id, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTextureParameteri(base_col_tex_id, GL_TEXTURE_WRAP_T, GL_REPEAT);
+
+    base_col_handle = glGetTextureHandleARB(base_col_tex_id);
+    glMakeTextureHandleResidentARB(base_col_handle);
+
+    stbi_image_free(pixels);
 
     // create shader program
     const std::string vs = FileManager::ReadTextFile("../../../resources/shaders/scene/vertex.glsl");
@@ -107,6 +146,7 @@ int main()
 
         PerFrameData frame_data{};
         frame_data.model_view_proj = mvp;
+        frame_data.base_color_handle = base_col_handle;
         glNamedBufferSubData(ubo, 0, sizeof(PerFrameData), &frame_data);
 
         glUseProgram(shader_prog);

@@ -859,6 +859,7 @@ namespace Okara::GlTF
             image.data.assign(binary_data_.begin() + view.byte_offset, binary_data_.begin() + view.byte_offset + view.byte_length);
         }
 
+    public:
         Header header_{};
         std::vector<std::byte> binary_data_;
         std::vector<BufferView> buffer_views_;
@@ -873,7 +874,6 @@ namespace Okara::GlTF
         PrimitiveMode primitive_mode_;
         size_t material_idx_;
 
-    public:
         std::vector<Material> materials_;
         std::vector<Texture> textures_;
         std::vector<Image> images_;
