@@ -1,3 +1,10 @@
+#define WIN32_LEAN_AND_MEAN
+#include <Windows.h>
+extern "C" {
+    __declspec(dllexport) DWORD NvOptimusEnablement = 0x00000001;
+    __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+}
+
 #include <glad/gl.h>
 #include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
@@ -102,7 +109,7 @@ layout (location = 1) in vec3 aColor;
 
 layout (location = 0) out vec3 vColor;
 
-layout (std140, binding = 0) readonly
+layout (std140, binding = 0)
 uniform FrameData {
 	mat4 MVP;
 } frameData;
@@ -151,7 +158,7 @@ const char* postProcessFrag = R"(
 layout (location = 0) in vec2 uv;
 layout (location = 0) out vec4 FragColor;
 
-layout (std430, binding = 0) readonly
+layout (std430, binding = 0)
 buffer ObjectData {
 	uvec2 sceneColorHandle;
 } objectData;
@@ -175,7 +182,7 @@ const char* thumbnailVertShader = R"(
 
 	layout (location = 0) out vec2 vTexCoord;
 
-	layout (std140, binding = 0) readonly
+	layout (std140, binding = 0)
 	uniform FrameData{
 		mat4 MVP;
 		uvec2 baseColorHandle;
@@ -195,7 +202,7 @@ const char* thumbnailFragShader = R"(
 
 	layout (location = 0) out vec4 FragColor;
 
-	layout (std140, binding = 0) readonly
+	layout (std140, binding = 0)
 	uniform FrameData{
 		mat4 MVP;
 		uvec2 baseColorHandle;
@@ -438,6 +445,9 @@ int main()
 
 	int version = gladLoadGL(glfwGetProcAddress);
 	if (!version) return EXIT_FAILURE;
+
+	std::cout << "Renderer: " << glGetString(GL_RENDERER) << "\n";
+	std::cout << "Vendor:   " << glGetString(GL_VENDOR) << "\n";
 
 	// Use the real frame-buffer size (differs from window size on HiDPI displays)
 	glfwGetFramebufferSize(window, &sWidth, &sHeight);

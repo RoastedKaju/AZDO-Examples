@@ -431,12 +431,10 @@ int main()
 	if (!GLAD_GL_ARB_bindless_texture)
 	{
 		std::cerr << "GL_ARB_bindless_texture not supported.\n";
-		return EXIT_FAILURE;
 	}
 	if (!GLAD_GL_ARB_gpu_shader_int64)
 	{
 		std::cerr << "GL_ARB_gpu_shader_int64 not supported.\n";
-		return EXIT_FAILURE;
 	}
 
 	glfwGetFramebufferSize(window, &sWidth, &sHeight);

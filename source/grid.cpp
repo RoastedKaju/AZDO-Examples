@@ -14,21 +14,22 @@
 static int sWidth = 800;
 static int sHeight = 600;
 
-void GLAPIENTRY glDebugOutput(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar* message, const void* userParam)
+void GLAPIENTRY glDebugOutput(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar *message, const void *userParam)
 {
 	// Ignore non-significant error codes
-	if (id == 131169 || id == 131185 || id == 131218 || id == 131204) return;
+	if (id == 131169 || id == 131185 || id == 131218 || id == 131204)
+		return;
 	std::cerr << "GL Debug [" << id << "] " << message << '\n';
 }
 
-static void FrameBufferSizeCallback(GLFWwindow* window, int width, int height)
+static void FrameBufferSizeCallback(GLFWwindow *window, int width, int height)
 {
 	sWidth = width;
 	sHeight = height;
 	glViewport(0, 0, width, height);
 }
 
-static GLuint CompileShader(GLenum type, const char* source)
+static GLuint CompileShader(GLenum type, const char *source)
 {
 	GLuint shader = glCreateShader(type);
 	glShaderSource(shader, 1, &source, nullptr);
@@ -42,13 +43,14 @@ static GLuint CompileShader(GLenum type, const char* source)
 		glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &logLen);
 		std::string log(logLen, '\0');
 		glGetShaderInfoLog(shader, logLen, nullptr, log.data());
-		std::cerr << "Shader compile error (" << (type == GL_VERTEX_SHADER ? "vertex" : "fragment") << "):\n" << log << std::endl;
+		std::cerr << "Shader compile error (" << (type == GL_VERTEX_SHADER ? "vertex" : "fragment") << "):\n"
+				  << log << std::endl;
 		exit(EXIT_FAILURE);
 	}
 	return shader;
 }
 
-static GLuint CreateShaderProgram(const char* vertexShaderSource, const char* fragmentShaderSource)
+static GLuint CreateShaderProgram(const char *vertexShaderSource, const char *fragmentShaderSource)
 {
 	GLuint vs = CompileShader(GL_VERTEX_SHADER, vertexShaderSource);
 	GLuint fs = CompileShader(GL_FRAGMENT_SHADER, fragmentShaderSource);
@@ -66,7 +68,8 @@ static GLuint CreateShaderProgram(const char* vertexShaderSource, const char* fr
 		glGetProgramiv(program, GL_INFO_LOG_LENGTH, &logLen);
 		std::string log(logLen, '\0');
 		glGetProgramInfoLog(program, logLen, nullptr, log.data());
-		std::cerr << "Program link error:\n" << log << std::endl;
+		std::cerr << "Program link error:\n"
+				  << log << std::endl;
 		exit(EXIT_FAILURE);
 	}
 
@@ -75,7 +78,7 @@ static GLuint CreateShaderProgram(const char* vertexShaderSource, const char* fr
 	return program;
 }
 
-static constexpr const char* cubeVS = R"(
+static constexpr const char *cubeVS = R"(
 #version 460 core
 
 layout(location=0) in vec3 position;
@@ -90,17 +93,16 @@ void main() {
 }
 )";
 
-static constexpr const char* convertFS = R"(
+static constexpr const char *convertFS = R"(
 #version 460 core
 
 #extension GL_ARB_bindless_texture : require
-#extension GL_ARB_gpu_shader_int64 : require
 
 layout (location = 0) in vec3 direction;
 layout (location = 0) out vec4 color;
 
 layout (binding = 0)
-readonly uniform Panorama{
+uniform Panorama{
 	uvec2 panoramaHandle;
 };
 
@@ -115,18 +117,17 @@ void main() {
 }
 )";
 
-static constexpr const char* skyboxFS = R"(
+static constexpr const char *skyboxFS = R"(
 #version 460 core
 
 #extension GL_ARB_bindless_texture : require
-#extension GL_ARB_gpu_shader_int64 : require
 
 in vec3 direction;
 
 layout (location = 0) out vec4 color;
 
 layout (binding = 0)
-readonly uniform CubemapData {
+uniform CubemapData {
 	uvec2 cubemapHandle;
 };
 
@@ -142,7 +143,7 @@ void main() {
 }
 )";
 
-const char* gridVS = R"(
+const char *gridVS = R"(
 #version 460 core
 
 layout(std140, binding = 1) uniform Camera
@@ -178,7 +179,7 @@ void main()
     gl_Position = vec4(ndc, 0.0, 1.0);
 })";
 
-const char* gridFS = R"(
+const char *gridFS = R"(
 #version 460 core
 
 layout(std140, binding = 1) uniform Camera
@@ -291,12 +292,12 @@ static CubeMesh MakeCube()
 	CubeMesh result{};
 
 	static const float vertices[] = {
-	  -1,-1,-1,  1,-1,-1,  1, 1,-1,  1, 1,-1, -1, 1,-1, -1,-1,-1,
-	  -1,-1, 1,  1,-1, 1,  1, 1, 1,  1, 1, 1, -1, 1, 1, -1,-1, 1,
-	  -1, 1, 1, -1, 1,-1, -1,-1,-1, -1,-1,-1, -1,-1, 1, -1, 1, 1,
-	   1, 1, 1,  1, 1,-1,  1,-1,-1,  1,-1,-1,  1,-1, 1,  1, 1, 1,
-	  -1,-1,-1,  1,-1,-1,  1,-1, 1,  1,-1, 1, -1,-1, 1, -1,-1,-1,
-	  -1, 1,-1,  1, 1,-1,  1, 1, 1,  1, 1, 1, -1, 1, 1, -1, 1,-1 };
+		-1, -1, -1, 1, -1, -1, 1, 1, -1, 1, 1, -1, -1, 1, -1, -1, -1, -1,
+		-1, -1, 1, 1, -1, 1, 1, 1, 1, 1, 1, 1, -1, 1, 1, -1, -1, 1,
+		-1, 1, 1, -1, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 1, -1, 1, 1,
+		1, 1, 1, 1, 1, -1, 1, -1, -1, 1, -1, -1, 1, -1, 1, 1, 1, 1,
+		-1, -1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, -1, -1, 1, -1, -1, -1,
+		-1, 1, -1, 1, 1, -1, 1, 1, 1, 1, 1, 1, -1, 1, 1, -1, 1, -1};
 
 	glCreateVertexArrays(1, &result.VAO);
 	glCreateBuffers(1, &result.VBO);
@@ -309,7 +310,7 @@ static CubeMesh MakeCube()
 	return result;
 }
 
-static GLuint LoadHDRI(const char* filePath)
+static GLuint LoadHDRI(const char *filePath)
 {
 	if (!std::filesystem::exists(filePath))
 	{
@@ -319,7 +320,7 @@ static GLuint LoadHDRI(const char* filePath)
 
 	int width, height, numChannels;
 	stbi_set_flip_vertically_on_load(true);
-	float* pixels = stbi_loadf(filePath, &width, &height, &numChannels, 3);
+	float *pixels = stbi_loadf(filePath, &width, &height, &numChannels, 3);
 	if (!pixels)
 	{
 		std::cerr << "Invalid data inside HRDI image: " << filePath << std::endl;
@@ -365,23 +366,23 @@ static GLuint PanoramaToCubemap(GLuint panorama, GLuint cubeVAO, GLuint conversi
 	glCreateFramebuffers(1, &FBO);
 
 	const glm::vec3 directions[6] =
-	{
-		{ 1.0f,  0.0f,  0.0f}, // +X
-		{-1.0f,  0.0f,  0.0f}, // -X
-		{ 0.0f,  1.0f,  0.0f}, // +Y
-		{ 0.0f, -1.0f,  0.0f}, // -Y
-		{ 0.0f,  0.0f,  1.0f}, // +Z
-		{ 0.0f,  0.0f, -1.0f}  // -Z
+		{
+			{1.0f, 0.0f, 0.0f},	 // +X
+			{-1.0f, 0.0f, 0.0f}, // -X
+			{0.0f, 1.0f, 0.0f},	 // +Y
+			{0.0f, -1.0f, 0.0f}, // -Y
+			{0.0f, 0.0f, 1.0f},	 // +Z
+			{0.0f, 0.0f, -1.0f}	 // -Z
 	};
 
 	const glm::vec3 ups[6] =
-	{
-		{ 0.0f, -1.0f,  0.0f}, // +X
-		{ 0.0f, -1.0f,  0.0f}, // -X
-		{ 0.0f,  0.0f,  1.0f}, // +Y
-		{ 0.0f,  0.0f, -1.0f}, // -Y
-		{ 0.0f, -1.0f,  0.0f}, // +Z
-		{ 0.0f, -1.0f, 0.0f}   // -Z
+		{
+			{0.0f, -1.0f, 0.0f}, // +X
+			{0.0f, -1.0f, 0.0f}, // -X
+			{0.0f, 0.0f, 1.0f},	 // +Y
+			{0.0f, 0.0f, -1.0f}, // -Y
+			{0.0f, -1.0f, 0.0f}, // +Z
+			{0.0f, -1.0f, 0.0f}	 // -Z
 	};
 
 	// 90 degree projection
@@ -442,7 +443,6 @@ static GLuint PanoramaToCubemap(GLuint panorama, GLuint cubeVAO, GLuint conversi
 	return cubemap;
 }
 
-
 int main()
 {
 	if (!glfwInit())
@@ -455,7 +455,7 @@ int main()
 	glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 	glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GLFW_TRUE);
 
-	GLFWwindow* window = glfwCreateWindow(sWidth, sHeight, "Grid", nullptr, nullptr);
+	GLFWwindow *window = glfwCreateWindow(sWidth, sHeight, "Grid", nullptr, nullptr);
 	if (!window)
 	{
 		glfwTerminate();
@@ -466,7 +466,20 @@ int main()
 	glfwSetFramebufferSizeCallback(window, &FrameBufferSizeCallback);
 
 	int version = gladLoadGL(glfwGetProcAddress);
-	if (!version) return EXIT_FAILURE;
+	if (!version)
+		return EXIT_FAILURE;
+
+	// Check extensions
+	if (!GLAD_GL_ARB_bindless_texture)
+	{
+		std::cerr << "'GL_ARB_bindless_texture' not supported.\n";
+		return EXIT_FAILURE;
+	}
+	if (!GLAD_GL_ARB_gpu_shader_int64)
+	{
+		std::cerr << "'GL_ARB_gpu_shader_int64' not supported.\n";
+		return EXIT_FAILURE;
+	}
 
 	// Use the real frame-buffer size (differs from window size on HiDPI displays)
 	glfwGetFramebufferSize(window, &sWidth, &sHeight);
@@ -501,7 +514,7 @@ int main()
 	GLuint cubemapUBO;
 	glCreateBuffers(1, &cubemapUBO);
 	glNamedBufferStorage(cubemapUBO, sizeof(GLuint64), &cubemapHandle, 0); // No need for dynamic sub-data, just send the handle once
-	glBindBufferBase(GL_UNIFORM_BUFFER, 0, cubemapUBO); // index 1 will be camera UBO for Grid
+	glBindBufferBase(GL_UNIFORM_BUFFER, 0, cubemapUBO);					   // index 1 will be camera UBO for Grid
 
 	// Cache locations
 	const GLint projectionLocation = glGetUniformLocation(skyboxProgram, "projection");
@@ -531,13 +544,11 @@ int main()
 		glm::mat4 view = glm::lookAt(eye, target, glm::vec3(0.0f, 1.0f, 0.0f));
 		glm::mat4 inverseViewProjection = inverse(projection * view);
 
-		CameraData cameraData
-		{
+		CameraData cameraData{
 			.uView = view,
 			.uProjection = projection,
 			.uInvViewProjection = inverseViewProjection,
-			.uCameraPosition = glm::vec4(eye, 1.0f)
-		};
+			.uCameraPosition = glm::vec4(eye, 1.0f)};
 		// Send UBO to shader
 		glNamedBufferSubData(grid.UBO, 0, sizeof(cameraData), &cameraData);
 
@@ -582,11 +593,11 @@ int main()
 	// Cleanup
 	glDeleteProgram(conversionProgram);
 	glDeleteProgram(skyboxProgram);
+	glMakeTextureHandleNonResidentARB(cubemapHandle);
 	glDeleteTextures(1, &cubemap);
 	glDeleteVertexArrays(1, &cubeMesh.VAO);
 	glDeleteBuffers(1, &cubeMesh.VBO);
 	glDeleteBuffers(1, &cubemapUBO);
-	glMakeTextureHandleNonResidentARB(cubemapHandle);
 	glDeleteVertexArrays(1, &grid.VAO);
 	glDeleteBuffers(1, &grid.UBO);
 	glfwDestroyWindow(window);
