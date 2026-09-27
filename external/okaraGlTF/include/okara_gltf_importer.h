@@ -1,15 +1,16 @@
-#pragma once
-
 #include <print>
-#include <iostream>
 #include <string>
 #include <fstream>
 #include <vector>
 #include <cstddef>
 #include <cassert>
-#include <cJSON.h>
 
-namespace Okara::GlTF
+#include "cJSON.h"
+
+// TODO: implement get failure reason function for this library
+// TODO: make function name start with a a capital letter
+
+namespace okara::gltf
 {
     static constexpr std::uint32_t GLB_MAGIC = 0x46546C67;
     static constexpr std::uint32_t GLB_VERSION = 2;
@@ -45,17 +46,6 @@ namespace Okara::GlTF
         int component_type{};
         int count{};
         std::string type{};
-    };
-
-    enum class PrimitiveMode
-    {
-        points = 0,
-        lines = 1,
-        line_loop = 2,
-        line_strip = 3,
-        triangles = 4,
-        triangle_strip = 5,
-        triangle_fan = 6
     };
 
     struct Vec4
@@ -110,12 +100,35 @@ namespace Okara::GlTF
         int source{-1};
     };
 
+    enum class PrimitiveRenderMode
+    {
+        kPoints = 0,
+        kLines = 1,
+        kLineLoop = 2,
+        kLineStrip = 3,
+        kTriangles = 4,
+        kTriangleStrip = 5,
+        kTriangleFan = 6
+    };
+
     struct Primitive
     {
         std::vector<Vertex> vertices;
         std::vector<uint32_t> indices;
+
+        std::size_t position_accessor{};
+        std::size_t normal_accessor{};
+        std::size_t texcoord_accessor{};
+        std::size_t tangent_accessor{};
+        std::size_t index_accessor{};
+
         std::size_t material{};
-        PrimitiveMode mode{PrimitiveMode::triangles};
+        PrimitiveRenderMode mode{PrimitiveRenderMode::kTriangles};
+    };
+
+    struct Mesh
+    {
+        std::vector<Primitive> primitives;
     };
 
     class Loader
@@ -166,7 +179,6 @@ namespace Okara::GlTF
             printHeaderData();
 
             // TODO: length variable in header is only 4 bytes but stream position is 64 bits
-
             if (header_.length != file_size)
             {
                 std::print("File size does not match value provided by header length.\n");
@@ -266,10 +278,11 @@ namespace Okara::GlTF
             }
 
             std::print("Meshes: {}\n", cJSON_GetArraySize(meshes));
-
             cJSON *mesh = nullptr;
             cJSON_ArrayForEach(mesh, meshes)
             {
+                Mesh mesh_result{};
+
                 cJSON *primitives = cJSON_GetObjectItemCaseSensitive(mesh, "primitives");
                 if (!cJSON_IsArray(primitives))
                 {
@@ -277,12 +290,12 @@ namespace Okara::GlTF
                     cJSON_Delete(root);
                     return false;
                 }
-
                 std::print("Primitives: {}\n", cJSON_GetArraySize(primitives));
-
                 cJSON *primitive = nullptr;
                 cJSON_ArrayForEach(primitive, primitives)
                 {
+                    Primitive primitive_result{};
+
                     cJSON *attributes = cJSON_GetObjectItemCaseSensitive(primitive, "attributes");
                     // attributes value in glTF is an object not an array
                     if (!cJSON_IsObject(attributes))
@@ -291,7 +304,6 @@ namespace Okara::GlTF
                         cJSON_Delete(root);
                         return false;
                     }
-
                     cJSON *attribute = nullptr;
                     cJSON_ArrayForEach(attribute, attributes)
                     {
@@ -299,22 +311,22 @@ namespace Okara::GlTF
                         // store position accessor index
                         if (std::strcmp(attribute->string, "POSITION") == 0)
                         {
-                            position_accessor_idx_ = static_cast<size_t>(attribute->valueint);
+                            primitive_result.position_accessor = static_cast<size_t>(attribute->valueint);
                         }
                         // store normal accessor index
                         else if (std::strcmp(attribute->string, "NORMAL") == 0)
                         {
-                            normal_accessor_idx_ = static_cast<size_t>(attribute->valueint);
+                            primitive_result.normal_accessor = static_cast<size_t>(attribute->valueint);
                         }
                         // texture coordinates accessor index
                         else if (std::strcmp(attribute->string, "TEXCOORD_0") == 0)
                         {
-                            texcoord_accessor_idx_ = static_cast<size_t>(attribute->valueint);
+                            primitive_result.texcoord_accessor = static_cast<size_t>(attribute->valueint);
                         }
                         // tangent accessor index
                         else if (std::strcmp(attribute->string, "TANGENT") == 0)
                         {
-                            tangent_accessor_idx_ = static_cast<size_t>(attribute->valueint);
+                            primitive_result.tangent_accessor = static_cast<size_t>(attribute->valueint);
                         }
                     }
 
@@ -322,23 +334,27 @@ namespace Okara::GlTF
                     if (cJSON_IsNumber(indices))
                     {
                         std::print("Indices accessor: {}\n", indices->valueint);
-                        index_accessor_idx_ = static_cast<size_t>(indices->valueint);
+                        primitive_result.index_accessor = static_cast<size_t>(indices->valueint);
                     }
 
                     cJSON *mode = cJSON_GetObjectItemCaseSensitive(primitive, "mode");
                     if (cJSON_IsNumber(mode))
                     {
                         std::print("Primitive mode: {}\n", mode->valueint);
-                        primitive_mode_ = static_cast<PrimitiveMode>(mode->valueint);
+                        primitive_result.mode = static_cast<PrimitiveRenderMode>(mode->valueint);
                     }
                     // this connects a primitive to our materials array
                     cJSON *material = cJSON_GetObjectItemCaseSensitive(primitive, "material");
                     if (cJSON_IsNumber(material))
                     {
                         std::print("Primitive material index: {}\n", material->valueint);
-                        material_idx_ = static_cast<size_t>(material->valueint);
+                        primitive_result.material = static_cast<size_t>(material->valueint);
                     }
+
+                    mesh_result.primitives.push_back(std::move(primitive_result));
                 }
+
+                meshes_.push_back(std::move(mesh_result));
             }
 
             // parse materials
@@ -392,7 +408,13 @@ namespace Okara::GlTF
             std::print("Read {} bytes of binary data.\n", binary_data_.size());
 
             // reads vertices, indices and fills up the mesh structure
-            primitive_ = buildMesh();
+            for (Mesh &m : meshes_)
+            {
+                for (Primitive &p : m.primitives)
+                {
+                    populatePrimitiveData(p);
+                }
+            }
 
             // extract images data
             for (Image &image : images_)
@@ -403,16 +425,34 @@ namespace Okara::GlTF
                 }
             }
 
-            const Material &material = materials_[primitive_.material];
-            if (material.base_color_texture >= 0)
+            // NOTE: print the mesh data
+            std::print("Meshes: {}\n", meshes_.size());
+            size_t mesh_count = 0;
+            for (const Mesh &m : meshes_)
             {
-                const Texture &texture = textures_[static_cast<std::size_t>(material.base_color_texture)];
-                const Image &image = images_[static_cast<std::size_t>(texture.source)];
-
-                std::print("Mesh material: {}\n", material.name);
-                std::print("Texture image MIME: {}\n", image.mime_type);
-                std::print("Texture image size: {} bytes\n", image.data.size());
+                std::print("\tMesh: {}\n", mesh_count);
+                size_t primitive_count = 0;
+                for (const Primitive &p : m.primitives)
+                {
+                    std::print("\t\tPrimitive: {}\n", primitive_count);
+                    std::print("\t\t\tvertices: {}\n", p.vertices.size());
+                    std::print("\t\t\tindices: {}\n", p.indices.size());
+                    std::print("\t\t\tmaterial: {}\n", p.material);
+                    ++primitive_count;
+                }
+                ++mesh_count;
             }
+
+            // const Material &material = materials_[meshes_[0].primitives[0].material];
+            // if (material.base_color_texture >= 0)
+            // {
+            //     const Texture &texture = textures_[static_cast<std::size_t>(material.base_color_texture)];
+            //     const Image &image = images_[static_cast<std::size_t>(texture.source)];
+
+            //     std::print("Mesh material: {}\n", material.name);
+            //     std::print("Texture image MIME: {}\n", image.mime_type);
+            //     std::print("Texture image size: {} bytes\n", image.data.size());
+            // }
 
             // release the temperory data
             binary_data_.clear();
@@ -669,22 +709,22 @@ namespace Okara::GlTF
             return true;
         }
 
-        size_t componentTypeSize(uint32_t component_type)
+        constexpr size_t componentTypeSize(uint32_t component_type)
         {
             switch (component_type)
             {
-            case 5120: // signed byte
-                return sizeof(uint8_t);
-            case 5121: // unsigned byte
-                return sizeof(uint8_t);
-            case 5122: // signed short
-                return sizeof(uint16_t);
-            case 5123: // unsigned short
-                return sizeof(uint16_t);
-            case 5125: // unsigned int
-                return sizeof(uint32_t);
-            case 5126: // float
-                return sizeof(float);
+            case 5120: // BYTE (int8_t)
+            case 5121: // UNSIGNED_BYTE (uint8_t)
+                return 1;
+
+            case 5122: // SHORT (int16_t)
+            case 5123: // UNSIGNED_SHORT (uint16_t)
+                return 2;
+
+            case 5125: // UNSIGNED_INT (uint32_t)
+            case 5126: // FLOAT (float)
+                return 4;
+
             default:
                 return 0;
             }
@@ -716,6 +756,8 @@ namespace Okara::GlTF
             const size_t stride = view.byte_stride != 0 ? view.byte_stride : element_size;
             return view_offset + index * stride;
         }
+
+        // TODO: possible optimization of memcpy functions by doing one call
 
         Vec4 readVec4(const Accessor &accessor, size_t index)
         {
@@ -751,29 +793,28 @@ namespace Okara::GlTF
             return result;
         }
 
-        Vec3 readPosition(std::size_t index)
+        Vec3 readPosition(const Accessor &accessor, std::size_t index)
         {
-            return readVec3(accessors_[position_accessor_idx_], index);
+            return readVec3(accessor, index);
         }
 
-        Vec3 readNormal(std::size_t index)
+        Vec3 readNormal(const Accessor &accessor, std::size_t index)
         {
-            return readVec3(accessors_[normal_accessor_idx_], index);
+            return readVec3(accessor, index);
         }
 
-        Vec2 readTexcoord(std::size_t index)
+        Vec2 readTexcoord(const Accessor &accessor, std::size_t index)
         {
-            return readVec2(accessors_[texcoord_accessor_idx_], index);
+            return readVec2(accessor, index);
         }
 
-        Vec4 readTangent(std::size_t index)
+        Vec4 readTangent(const Accessor &accessor, std::size_t index)
         {
-            return readVec4(accessors_[tangent_accessor_idx_], index);
+            return readVec4(accessor, index);
         }
 
-        uint32_t readIndex(std::size_t index)
+        uint32_t readIndex(const Accessor &accessor, std::size_t index)
         {
-            const Accessor &accessor = accessors_[index_accessor_idx_];
             const size_t offset = calculateOffset(accessor, index);
 
             switch (accessor.component_type)
@@ -801,52 +842,44 @@ namespace Okara::GlTF
                 return 0;
             }
 
+            assert(false && "Unsupported index component type");
             return 0;
         }
 
-        Vertex readVertex(std::size_t index)
+        Vertex readVertex(const Primitive &primitive, std::size_t index)
         {
             Vertex result{};
 
-            result.position = readPosition(index);
-            result.normal = readNormal(index);
-            result.uv = readTexcoord(index);
-            result.tangent = readTangent(index);
+            result.position = readPosition(accessors_[primitive.position_accessor], index);
+            result.normal = readNormal(accessors_[primitive.normal_accessor], index);
+            result.uv = readTexcoord(accessors_[primitive.texcoord_accessor], index);
+            result.tangent = readTangent(accessors_[primitive.tangent_accessor], index);
 
             return result;
         }
 
-        std::size_t triangleCount() const
+        std::size_t triangleCount(const Accessor &accessor) const
         {
-            const Accessor &index_accessor = accessors_[index_accessor_idx_];
-            assert(index_accessor.count % 3 == 0);
-            return index_accessor.count / 3;
+            assert(accessor.count % 3 == 0);
+            return accessor.count / 3;
         }
 
-        Primitive buildMesh()
+        void populatePrimitiveData(Primitive &primitive)
         {
-            Primitive mesh{};
-
-            const Accessor &position_accessor = accessors_[position_accessor_idx_];
-            mesh.vertices.reserve(position_accessor.count);
+            const Accessor &position_accessor = accessors_[primitive.position_accessor];
+            primitive.vertices.reserve(position_accessor.count);
             for (size_t i = 0; i < position_accessor.count; ++i)
             {
-                mesh.vertices.push_back(readVertex(i));
+                primitive.vertices.push_back(readVertex(primitive, i));
             }
 
-            const Accessor &index_accessor = accessors_[index_accessor_idx_];
-            mesh.indices.reserve(index_accessor.count);
+            const Accessor &index_accessor = accessors_[primitive.index_accessor];
+            primitive.indices.reserve(index_accessor.count);
             for (size_t i = 0; i < index_accessor.count; ++i)
             {
-                mesh.indices.push_back(readIndex(i));
+                primitive.indices.push_back(readIndex(index_accessor, i));
             }
-            assert(mesh.indices.size() % 3 == 0);
-
-            mesh.mode = primitive_mode_;
-
-            mesh.material = material_idx_;
-
-            return mesh;
+            assert(primitive.indices.size() % 3 == 0);
         }
 
         void extractImageData(Image &image)
@@ -859,25 +892,16 @@ namespace Okara::GlTF
             image.data.assign(binary_data_.begin() + view.byte_offset, binary_data_.begin() + view.byte_offset + view.byte_length);
         }
 
+    public:
         Header header_{};
         std::vector<std::byte> binary_data_;
         std::vector<BufferView> buffer_views_;
         std::vector<Accessor> accessors_;
 
-        size_t position_accessor_idx_;
-        size_t normal_accessor_idx_;
-        size_t index_accessor_idx_;
-        size_t texcoord_accessor_idx_;
-        size_t tangent_accessor_idx_;
+        std::vector<Mesh> meshes_;
 
-        PrimitiveMode primitive_mode_;
-        size_t material_idx_;
-
-    public:
         std::vector<Material> materials_;
         std::vector<Texture> textures_;
         std::vector<Image> images_;
-
-        Primitive primitive_;
     };
 }

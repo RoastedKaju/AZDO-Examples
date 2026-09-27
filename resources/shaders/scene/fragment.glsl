@@ -4,18 +4,25 @@
 #extension GL_ARB_gpu_shader_int64 : require
 
 layout (location = 0) in vec2 vTexCoord;
+layout (location = 1) flat in int vDrawID;
 
 layout (location = 0) out vec4 outColor;
 
-layout (std140, binding = 0)
-uniform PerFrameData
+struct MaterialData
 {
-    mat4 uModelViewProj;
-    uvec2 uBaseColorHandle;
+    uvec2 baseColHandle;
+};
+
+layout (std430, binding = 1)
+readonly buffer MaterialBuffer
+{
+    MaterialData materials[];
 };
 
 void main()
 {
-    sampler2D baseColSampler = sampler2D(uBaseColorHandle);
+    uvec2 handle = materials[vDrawID].baseColHandle;
+    sampler2D baseColSampler = sampler2D(handle);
+    
     outColor = texture(baseColSampler, vTexCoord);
 }
