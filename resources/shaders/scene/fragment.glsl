@@ -4,7 +4,7 @@
 #extension GL_ARB_gpu_shader_int64 : require
 
 layout (location = 0) in vec2 vTexCoord;
-layout (location = 1) flat in int vDrawID;
+layout (location = 1) flat in int vMaterialIndex;
 
 layout (location = 0) out vec4 outColor;
 
@@ -21,8 +21,10 @@ readonly buffer MaterialBuffer
 
 void main()
 {
-    uvec2 handle = materials[vDrawID].baseColHandle;
-    sampler2D baseColSampler = sampler2D(handle);
+    // fetch material handle using the instance's material index
+    uvec2 handle = materials[vMaterialIndex].baseColHandle;
     
+    // construct bindless sampler and sample texture
+    sampler2D baseColSampler = sampler2D(handle);
     outColor = texture(baseColSampler, vTexCoord);
 }

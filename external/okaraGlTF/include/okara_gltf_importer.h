@@ -5,6 +5,7 @@
 #include <vector>
 #include <cstddef>
 #include <cassert>
+#include <memory>
 
 #include "cJSON.h"
 
@@ -21,6 +22,7 @@ namespace okara::gltf
     static constexpr std::uint32_t GLB_VERSION = 2;
     static constexpr std::uint32_t JSON_CHUNK = 0x4E4F534A;
     static constexpr std::uint32_t BIN_CHUNK = 0x004E4942;
+
     // clang-format off
     static constexpr Matrix4x4 IDENTITY_MATRIX = {
         1, 0, 0, 0,
@@ -29,6 +31,24 @@ namespace okara::gltf
         0, 0, 0, 1,
     };
     // clang-format on
+
+    struct cJSONDeleter
+    {
+        void operator()(cJSON *ptr) const
+        {
+            cJSON_Delete(ptr);
+        }
+    };
+
+    enum class ComponentType : uint32_t
+    {
+        kByte = 5120,
+        kUnsignedByte = 5121,
+        kShort = 5122,
+        kUnsignedShort = 5123,
+        kUnsignedInt = 5125,
+        kFloat = 5126
+    };
 
     static inline Matrix4x4 Multiply(const Matrix4x4 &a, const Matrix4x4 &b)
     {
@@ -100,6 +120,7 @@ namespace okara::gltf
         std::int32_t component_type{}; // float (5126), unsigned short (5123)
         std::size_t count{};           // number of elements in accessor
         std::string type{};            // "SCALAR", "VEC2", "VEC3", "VEC4", "MAT2", "MAT3", "MAT4"
+        bool normalized{false};        // whether integer values should be normalized to [-1, 1] or [0, 1]
     };
 
 #pragma pack(push, 1)
@@ -111,8 +132,8 @@ namespace okara::gltf
         float uv0[2]{0.0f, 0.0f};
         float uv1[2]{0.0f, 0.0f};
         float color0[4]{1.0f, 1.0f, 1.0f, 1.0f};
-        float joints0[4]{0.0f, 0.0f, 0.0f, 0.0f};
         float weights0[4]{0.0f, 0.0f, 0.0f, 0.0f};
+        std::uint16_t joints0[4]{0, 0, 0, 0};
     };
 #pragma pack(pop)
 
@@ -205,6 +226,7 @@ namespace okara::gltf
     struct MeshInstance
     {
         std::int32_t mesh{-1};
+        std::int32_t skin{-1};
         Matrix4x4 world_transform{IDENTITY_MATRIX};
     };
 
@@ -219,7 +241,9 @@ namespace okara::gltf
         bool has_matrix{false};
         Matrix4x4 matrix = IDENTITY_MATRIX;
 
-        int mesh{-1};
+        std::int32_t mesh{-1};
+        std::int32_t skin{-1};
+        std::int32_t parent{-1};
     };
 
     struct Scene
@@ -228,11 +252,27 @@ namespace okara::gltf
         std::vector<int> nodes;
     };
 
+    struct Skin
+    {
+        std::string name{};
+
+        std::int32_t inverse_bind_accessor{-1};
+
+        // optional node that identifies the skeleton root
+        std::int32_t skeleton{-1};
+
+        // node indices representing the joints
+        std::vector<std::int32_t> joints;
+
+        std::vector<Matrix4x4> inverse_bind_matrices;
+    };
+
     class Loader
     {
     public:
         bool LoadScene(const std::string &path)
         {
+            
             std::ifstream file(path, std::ios::binary);
             if (!file.is_open())
             {
@@ -276,10 +316,18 @@ namespace okara::gltf
             // print header data
             std::print("Magic: 0x{:08X}, Version: {}, Length: {}\n", header_.magic, header_.version, header_.length);
 
-            // TODO: length variable in header is only 4 bytes but stream position is 64 bits
-            if (header_.length != file_size)
+            const auto expected_length = static_cast<std::size_t>(header_.length);
+            const auto actual_file_size = static_cast<std::size_t>(file_size);
+            if (expected_length != actual_file_size)
             {
                 std::print("File size does not match value provided by header length.\n");
+                return false;
+            }
+
+            // check if file stream has remaining data
+            if (file.peek() == std::ifstream::traits_type::eof())
+            {
+                std::print("File stream has no remaining data.\n");
                 return false;
             }
 
@@ -312,18 +360,17 @@ namespace okara::gltf
             // print chunk header data
             std::print("Chunk Header Type: {:08X}, Length: {}\n", chunk_header.type, chunk_header.length);
 
-            cJSON *root = cJSON_ParseWithLength(json_data.data(), json_data.size());
+            std::unique_ptr<cJSON, cJSONDeleter> root(cJSON_ParseWithLength(json_data.data(), json_data.size()));
             if (!root)
             {
                 std::print("Failed to parse GLB JSON.\n");
                 return false;
             }
             // get asset object
-            cJSON *asset = cJSON_GetObjectItemCaseSensitive(root, "asset");
+            cJSON *asset = cJSON_GetObjectItemCaseSensitive(root.get(), "asset");
             if (!cJSON_IsObject(asset))
             {
                 std::print("GLB JSON does not contain a valid asset object.\n");
-                cJSON_Delete(root);
                 return false;
             }
             // get version
@@ -331,14 +378,12 @@ namespace okara::gltf
             if (!cJSON_IsString(version))
             {
                 std::print("GLB asset does not contain a valid version.\n");
-                cJSON_Delete(root);
                 return false;
             }
 
             if (std::strcmp(version->valuestring, "2.0") != 0)
             {
                 std::print("Unsupported glTF version: {}\n", version->valuestring);
-                cJSON_Delete(root);
                 return false;
             }
 
@@ -347,73 +392,66 @@ namespace okara::gltf
             // binary chunk is just raw bytes, buffer describes a region, view describes how to interpret it, accessors are attributes
 
             // buffers
-            if (!ParseBuffers(root))
+            if (!ParseBuffers(root.get()))
             {
-                cJSON_Delete(root);
+                cJSON_Delete(root.get());
                 return false;
             }
 
             // buffer views
-            if (!ParseBufferViews(root))
+            if (!ParseBufferViews(root.get()))
             {
-                cJSON_Delete(root);
                 return false;
             }
 
             // accessors know how to interpert the data where buffer views point
-            if (!ParseAccessors(root))
+            if (!ParseAccessors(root.get()))
             {
-                cJSON_Delete(root);
                 return false;
             }
 
             // inspect meshes
-            if (!ParseMeshes(root))
+            if (!ParseMeshes(root.get()))
             {
-                cJSON_Delete(root);
                 return false;
             }
 
             // nodes
-            if (!ParseNodes(root))
+            if (!ParseNodes(root.get()))
             {
-                cJSON_Delete(root);
+                return false;
+            }
+            // skins
+            if (!ParseSkins(root.get()))
+            {
                 return false;
             }
             // scenes
-            if (!ParseScenes(root))
+            if (!ParseScenes(root.get()))
             {
-                cJSON_Delete(root);
                 return false;
             }
 
             // materials
-            if (!ParseMaterials(root))
+            if (!ParseMaterials(root.get()))
             {
-                cJSON_Delete(root);
                 return false;
             }
             // textures
-            if (!ParseTextures(root))
+            if (!ParseTextures(root.get()))
             {
-                cJSON_Delete(root);
                 return false;
             }
             // samplers
-            if (!ParseSamplers(root))
+            if (!ParseSamplers(root.get()))
             {
-                cJSON_Delete(root);
                 return false;
             }
             // images
-            if (!ParseImages(root))
+            if (!ParseImages(root.get()))
             {
-                cJSON_Delete(root);
                 return false;
             }
-
-            // by this point we have all of our meta data
-            cJSON_Delete(root);
 
             // read binary chunk header
             ChunkHeader bin_chunk_header{};
@@ -456,6 +494,15 @@ namespace okara::gltf
                 if (image.buffer_view >= 0)
                 {
                     CopyImageData(image);
+                }
+            }
+
+            // store inverse bind matrices for each skin
+            for (Skin &skin : skins_)
+            {
+                if (!ReadInverseBindMatrices(skin))
+                {
+                    return false;
                 }
             }
 
@@ -594,6 +641,7 @@ namespace okara::gltf
                 cJSON *component_type = cJSON_GetObjectItemCaseSensitive(accessor, "componentType");
                 cJSON *count = cJSON_GetObjectItemCaseSensitive(accessor, "count");
                 cJSON *type = cJSON_GetObjectItemCaseSensitive(accessor, "type");
+                cJSON *normalized = cJSON_GetObjectItemCaseSensitive(accessor, "normalized");
 
                 if (!cJSON_IsNumber(component_type) || !cJSON_IsNumber(count) || !cJSON_IsString(type))
                 {
@@ -613,6 +661,7 @@ namespace okara::gltf
                 result.component_type = static_cast<std::int32_t>(component_type->valueint);
                 result.count = static_cast<std::size_t>(count->valueint);
                 result.type = type->valuestring;
+                result.normalized = cJSON_IsBool(normalized) ? cJSON_IsTrue(normalized) : false;
 
                 accessors_.push_back(result);
             }
@@ -644,7 +693,6 @@ namespace okara::gltf
                     std::print("Mesh does not contain a valid primitives array.\n");
                     return false;
                 }
-                std::print("Primitives: {}\n", cJSON_GetArraySize(primitives_json));
                 cJSON *primitive_json = nullptr;
                 cJSON_ArrayForEach(primitive_json, primitives_json)
                 {
@@ -1019,9 +1067,91 @@ namespace okara::gltf
                         result.matrix[i] = static_cast<float>(cJSON_GetArrayItem(matrix_json, i)->valuedouble);
                     }
                 }
+                // skin
+                cJSON *skin = cJSON_GetObjectItemCaseSensitive(node_json, "skin");
+                if (cJSON_IsNumber(skin))
+                {
+                    result.skin = skin->valueint;
+                }
 
                 nodes_.push_back(std::move(result));
             }
+
+            // build node parents
+            for (std::size_t parent_idx = 0; parent_idx < nodes_.size(); ++parent_idx)
+            {
+                const Node &parent_node = nodes_[parent_idx];
+                for (const auto child_idx : parent_node.children)
+                {
+                    nodes_[child_idx].parent = static_cast<std::int32_t>(parent_idx);
+                }
+            }
+
+            return true;
+        }
+
+        bool ParseSkins(cJSON *root)
+        {
+            cJSON *skins_json = cJSON_GetObjectItemCaseSensitive(root, "skins");
+            if (!cJSON_IsArray(skins_json))
+            {
+                return true;
+            }
+
+            skins_.clear();
+            skins_.reserve(cJSON_GetArraySize(skins_json));
+
+            cJSON *skin_json = nullptr;
+            cJSON_ArrayForEach(skin_json, skins_json)
+            {
+                if (!cJSON_IsObject(skin_json))
+                {
+                    return false;
+                }
+
+                Skin result{};
+
+                // name
+                cJSON *name = cJSON_GetObjectItemCaseSensitive(skin_json, "name");
+                if (cJSON_IsString(name))
+                {
+                    result.name = name->valuestring;
+                }
+                // inverseBindMatrices
+                cJSON *inverse_bind_matrices = cJSON_GetObjectItemCaseSensitive(skin_json, "inverseBindMatrices");
+                if (cJSON_IsNumber(inverse_bind_matrices))
+                {
+                    result.inverse_bind_accessor = inverse_bind_matrices->valueint;
+                }
+                // skeleton
+                cJSON *skeleton = cJSON_GetObjectItemCaseSensitive(skin_json, "skeleton");
+                if (cJSON_IsNumber(skeleton))
+                {
+                    result.skeleton = skeleton->valueint;
+                }
+                // joints
+                cJSON *joints = cJSON_GetObjectItemCaseSensitive(skin_json, "joints");
+                if (!cJSON_IsArray(joints))
+                {
+                    std::print("skin must contain a joints array\n");
+                    return false;
+                }
+
+                cJSON *joint = nullptr;
+                cJSON_ArrayForEach(joint, joints)
+                {
+                    if (!cJSON_IsNumber(joint))
+                    {
+                        std::print("skin joint must be a node index\n");
+                        return false;
+                    }
+
+                    result.joints.push_back(joint->valueint);
+                }
+
+                skins_.push_back(std::move(result));
+            }
+
             return true;
         }
 
@@ -1079,11 +1209,11 @@ namespace okara::gltf
             const Accessor &pos_accessor = accessors_[primitive.position_accessor];
             const std::size_t vertex_count = pos_accessor.count;
 
-            // clean up vertices
             primitive.vertices.clear();
             primitive.vertices.resize(vertex_count);
 
-            auto read_attribute_floats = [&](int32_t accessor_idx, size_t float_count, auto get_target_ptr)
+            // Read attributes converted to float
+            auto read_float_attribute = [&](int32_t accessor_idx, size_t num_components, auto get_target_ptr)
             {
                 if (accessor_idx < 0)
                 {
@@ -1094,38 +1224,59 @@ namespace okara::gltf
                 const BufferView &view = buffer_views_[acc.buffer_view];
 
                 const std::byte *src_bytes = binary_data_.data() + view.byte_offset + acc.byte_offset;
-
-                const std::size_t element_size = float_count * sizeof(float);
+                const ComponentType comp_type = static_cast<ComponentType>(acc.component_type);
+                const std::size_t comp_size = GetComponentSize(comp_type);
+                const std::size_t element_size = num_components * comp_size;
                 const std::size_t stride = (view.byte_stride > 0) ? view.byte_stride : element_size;
 
-                if (stride == element_size)
+                for (std::size_t i = 0; i < vertex_count; ++i)
                 {
-                    // fast path: contiguous data
-                    for (std::size_t i = 0; i < vertex_count; ++i)
+                    const std::byte *elem_ptr = src_bytes + (i * stride);
+                    float *dst_ptr = get_target_ptr(primitive.vertices[i]);
+
+                    for (size_t c = 0; c < num_components; ++c)
                     {
-                        std::memcpy(get_target_ptr(primitive.vertices[i]), src_bytes + (i * element_size), element_size);
-                    }
-                }
-                else
-                {
-                    // slow path: strided interleaved data
-                    for (std::size_t i = 0; i < vertex_count; ++i)
-                    {
-                        std::memcpy(get_target_ptr(primitive.vertices[i]), src_bytes + (i * stride), element_size);
+                        dst_ptr[c] = ReadComponentAsFloat(elem_ptr + (c * comp_size), comp_type, acc.normalized);
                     }
                 }
             };
 
-            // decode each attribute across all vertices at once
+            // Read integer attributes
+            auto read_joint_attribute = [&](int32_t accessor_idx, auto get_target_ptr)
+            {
+                if (accessor_idx < 0)
+                    return;
+
+                const Accessor &acc = accessors_[accessor_idx];
+                const BufferView &view = buffer_views_[acc.buffer_view];
+
+                const std::byte *src_bytes = binary_data_.data() + view.byte_offset + acc.byte_offset;
+                const ComponentType comp_type = static_cast<ComponentType>(acc.component_type);
+                const std::size_t comp_size = GetComponentSize(comp_type);
+                const std::size_t element_size = 4 * comp_size;
+                const std::size_t stride = (view.byte_stride > 0) ? view.byte_stride : element_size;
+
+                for (std::size_t i = 0; i < vertex_count; ++i)
+                {
+                    const std::byte *elem_ptr = src_bytes + (i * stride);
+                    auto *dst_ptr = get_target_ptr(primitive.vertices[i]); // uint16_t[4] or uint32_t[4]
+
+                    for (size_t c = 0; c < 4; ++c)
+                    {
+                        dst_ptr[c] = ReadComponentAsUint(elem_ptr + (c * comp_size), comp_type);
+                    }
+                }
+            };
+
             // clang-format off
-            read_attribute_floats(primitive.position_accessor, 3, [](Vertex &v) { return v.position; });
-            read_attribute_floats(primitive.normal_accessor, 3, [](Vertex &v) { return v.normal; });
-            read_attribute_floats(primitive.tangent_accessor, 4, [](Vertex &v) { return v.tangent; });
-            read_attribute_floats(primitive.texcoord0_accessor, 2, [](Vertex &v) { return v.uv0; });
-            read_attribute_floats(primitive.texcoord1_accessor, 2, [](Vertex &v) { return v.uv1; });
-            read_attribute_floats(primitive.color0_accessor, 4, [](Vertex &v) { return v.color0; });
-            read_attribute_floats(primitive.joints0_accessor, 4, [](Vertex &v) { return v.joints0; });
-            read_attribute_floats(primitive.weights0_accessor, 4, [](Vertex &v) { return v.weights0; });
+            read_float_attribute(primitive.position_accessor, 3, [](Vertex &v) { return v.position; });
+            read_float_attribute(primitive.normal_accessor, 3, [](Vertex &v) { return v.normal; });
+            read_float_attribute(primitive.tangent_accessor, 4, [](Vertex &v) { return v.tangent; });
+            read_float_attribute(primitive.texcoord0_accessor, 2, [](Vertex &v) { return v.uv0; });
+            read_float_attribute(primitive.texcoord1_accessor, 2, [](Vertex &v) { return v.uv1; });
+            read_float_attribute(primitive.color0_accessor, 4, [](Vertex &v) { return v.color0; });
+            read_float_attribute(primitive.weights0_accessor, 4, [](Vertex &v) { return v.weights0; });
+            read_joint_attribute(primitive.joints0_accessor, [](Vertex &v) { return v.joints0; });
             // clang-format on
         }
 
@@ -1196,7 +1347,7 @@ namespace okara::gltf
             {
                 if (stride == 0 || stride == sizeof(std::uint32_t))
                 {
-                    // FASTEST PATH: Directly copy contiguous 32-bit uint block
+                    // directly copy contiguous 32-bit uint block
                     std::memcpy(primitive.indices.data(), src_bytes, acc.count * sizeof(std::uint32_t));
                 }
                 else
@@ -1254,8 +1405,6 @@ namespace okara::gltf
 
         void TraverseNode(int index, const Matrix4x4 &parent_transform)
         {
-            std::print("Visiting node {}\n", index);
-
             const Node &node = nodes_[index];
             const Matrix4x4 local_transform = node.has_matrix ? node.matrix : ComposeTranslationRotationScale(node.translation, node.rotation, node.scale);
             const Matrix4x4 world_transform = Multiply(parent_transform, local_transform);
@@ -1265,6 +1414,7 @@ namespace okara::gltf
                 MeshInstance instance{};
                 instance.mesh = node.mesh;
                 instance.world_transform = world_transform;
+                instance.skin = node.skin;
 
                 mesh_instances_.push_back(std::move(instance));
             }
@@ -1272,6 +1422,178 @@ namespace okara::gltf
             for (int child : node.children)
             {
                 TraverseNode(child, world_transform);
+            }
+        }
+
+        bool ReadInverseBindMatrices(Skin &skin)
+        {
+            skin.inverse_bind_matrices.clear();
+
+            if (skin.inverse_bind_accessor < 0)
+            {
+                return true;
+            }
+
+            const Accessor &accessor = accessors_.at(static_cast<std::size_t>(skin.inverse_bind_accessor));
+            if (accessor.type != "MAT4")
+            {
+                std::print("Inverse bind matrices accessor must be of type MAT4.\n");
+                return false;
+            }
+            if (accessor.component_type != 5126) // FLOAT
+            {
+                std::print("Inverse bind matrices accessor must have component type FLOAT.\n");
+                return false;
+            }
+
+            if (accessor.buffer_view < 0)
+            {
+                std::print("Inverse bind matrices accessor has no buffer view.\n");
+                return false;
+            }
+
+            const BufferView &buffer_view = buffer_views_.at(static_cast<std::size_t>(accessor.buffer_view));
+            constexpr std::size_t matrix_size = sizeof(float) * 16;
+            const std::size_t offset = buffer_view.byte_offset + accessor.byte_offset;
+            const std::size_t required_size = static_cast<std::size_t>(accessor.count) * matrix_size;
+
+            if (offset + required_size > binary_data_.size())
+            {
+                std::print("Inverse bind matrices exceed binary data bounds.\n");
+                return false;
+            }
+
+            if (accessor.count != skin.joints.size())
+            {
+                std::print("Inverse bind matrix count ({}) does not match joint count ({}).\n", accessor.count, skin.joints.size());
+
+                return false;
+            }
+
+            skin.inverse_bind_matrices.resize(accessor.count);
+            const std::byte *source = binary_data_.data() + offset;
+            std::memcpy(skin.inverse_bind_matrices.data(), source, required_size);
+
+            return true;
+        }
+
+        Matrix4x4 CalculateNodeWorldTransform(std::int32_t node_idx)
+        {
+            const Node &node = nodes_[node_idx];
+
+            Matrix4x4 local;
+
+            if (node.has_matrix)
+            {
+                local = node.matrix;
+            }
+            else
+            {
+                local = ComposeTranslationRotationScale(node.translation, node.rotation, node.scale);
+            }
+
+            if (node.parent < 0)
+            {
+                return local;
+            }
+
+            return Multiply(CalculateNodeWorldTransform(node.parent), local);
+        }
+
+        Matrix4x4 CalculateJointMatrix(const Skin &skin, std::size_t joint_idx)
+        {
+            if (joint_idx >= skin.joints.size())
+            {
+                std::print("Joint index {} is out of range.\n", joint_idx);
+                return Matrix4x4{};
+            }
+
+            if (joint_idx >= skin.inverse_bind_matrices.size())
+            {
+                std::print("Inverse bind matrix index {} is out of range.\n", joint_idx);
+                return Matrix4x4{};
+            }
+
+            const std::int32_t node_idx = skin.joints[joint_idx];
+            const Matrix4x4 joint_world = CalculateNodeWorldTransform(node_idx);
+
+            return Multiply(joint_world, skin.inverse_bind_matrices[joint_idx]);
+        }
+
+        std::size_t GetComponentSize(ComponentType type)
+        {
+            switch (type)
+            {
+            case ComponentType::kByte:
+            case ComponentType::kUnsignedByte:
+                return 1;
+            case ComponentType::kShort:
+            case ComponentType::kUnsignedShort:
+                return 2;
+            case ComponentType::kUnsignedInt:
+            case ComponentType::kFloat:
+                return 4;
+            }
+            return 4;
+        }
+
+        std::int32_t ReadComponentAsUint(const std::byte *src, ComponentType type)
+        {
+            switch (type)
+            {
+            case ComponentType::kUnsignedByte:
+                return *reinterpret_cast<const uint8_t *>(src);
+            case ComponentType::kUnsignedShort:
+            {
+                uint16_t val;
+                std::memcpy(&val, src, sizeof(uint16_t));
+                return val;
+            }
+            case ComponentType::kUnsignedInt:
+            {
+                uint32_t val;
+                std::memcpy(&val, src, sizeof(uint32_t));
+                return val;
+            }
+            default:
+                return 0;
+            }
+        }
+
+        inline float ReadComponentAsFloat(const std::byte *src, ComponentType type, bool normalized)
+        {
+            switch (type)
+            {
+            case ComponentType::kFloat:
+            {
+                float val;
+                std::memcpy(&val, src, sizeof(float));
+                return val;
+            }
+            case ComponentType::kUnsignedByte:
+            {
+                uint8_t val = *reinterpret_cast<const uint8_t *>(src);
+                return normalized ? (val / 255.0f) : static_cast<float>(val);
+            }
+            case ComponentType::kUnsignedShort:
+            {
+                uint16_t val;
+                std::memcpy(&val, src, sizeof(uint16_t));
+                return normalized ? (val / 65535.0f) : static_cast<float>(val);
+            }
+            case ComponentType::kByte:
+            {
+                int8_t val = *reinterpret_cast<const int8_t *>(src);
+                return normalized ? std::max(val / 127.0f, -1.0f) : static_cast<float>(val);
+            }
+            case ComponentType::kShort:
+            {
+                int16_t val;
+                std::memcpy(&val, src, sizeof(int16_t));
+                return normalized ? std::max(val / 32767.0f, -1.0f) : static_cast<float>(val);
+            }
+            default:
+                return 0.0f;
             }
         }
 
@@ -1284,6 +1606,7 @@ namespace okara::gltf
         std::vector<Mesh> meshes_;
         std::vector<MeshInstance> mesh_instances_;
         std::vector<Node> nodes_;
+        std::vector<Skin> skins_;
         std::vector<Scene> scenes_;
         int default_scene_{-1};
 

@@ -38,6 +38,19 @@ struct Transform
     }
 };
 
+struct Renderable
+{
+    std::uint32_t mesh_id{UINT32_MAX};
+    std::uint32_t material_id{UINT32_MAX};
+};
+
+struct DrawItem
+{
+    std::uint32_t mesh_id;
+    std::uint32_t material_id;
+    glm::mat4 world;
+};
+
 class Node
 {
 public:
@@ -113,6 +126,8 @@ public:
 
     glm::vec3 WorldPosition() const { return glm::vec3(WorldMatrix()[3]); }
 
+    Renderable GetRenderable() const { return renderable_; }
+
     std::string name;
 
 private:
@@ -135,7 +150,20 @@ private:
 
     Node *parent_ = nullptr;
     std::vector<std::unique_ptr<Node>> children_;
+
+    Renderable renderable_;
 };
+
+static inline void CollectDrawItems(const Node &node, std::vector<DrawItem> &out_items)
+{
+    const auto &renderable = node.GetRenderable();
+    out_items.push_back({renderable.mesh_id, renderable.material_id, node.WorldMatrix()});
+
+    for (const auto &child : node.Children())
+    {
+        CollectDrawItems(*child, out_items);
+    }
+}
 
 void PrintTree(const Node &node, int depth = 0)
 {
@@ -156,16 +184,6 @@ void Exercise()
     auto *wheel_left = car->AddChild(std::make_unique<Node>("wheel_left"));
     car->AddChild(std::make_unique<Node>("wheel_right"));
     auto *tree = root->AddChild(std::make_unique<Node>("tree"));
-
-    // print
-    PrintTree(*root);
-
-    // remove wheel_left from car and attach it to tree
-    std::unique_ptr<Node> wheel_left_temp = car->RemoveChild(wheel_left);
-    tree->AddChild(std::move(wheel_left_temp));
-
-    // print again
-    PrintTree(*root);
 
     exit(EXIT_SUCCESS);
 }
@@ -191,14 +209,21 @@ struct DrawElementsIndirectCommand
     GLuint baseInstance;  // offset added to gl_InstanceID / gl_DrawID
 };
 
-struct MaterialData
-{
-    GLuint64 base_col_handle;
-};
-
 struct PerFrameData
 {
-    glm::mat4 model_view_proj;
+    glm::mat4 view_proj;
+};
+
+struct alignas(16) PerInstanceData
+{
+    glm::mat4 world_matrix;
+    int32_t material_index;
+    int32_t padding[3] = {0, 0, 0};
+};
+
+struct PerMaterialData
+{
+    GLuint64 base_col_handle;
 };
 
 // helper to create a fallback 1x1 solid texture for missing textures
@@ -219,21 +244,36 @@ LoadedTexture CreateFallbackTexture()
 GLuint vao, vbo, ebo;
 GLuint indirect_buffer;
 GLuint material_ssbo;
+GLuint instance_ssbo;
 
 std::vector<DrawElementsIndirectCommand> indirect_commands;
-std::vector<MaterialData> materials_gpu;
+std::vector<PerInstanceData> instances_gpu;
+std::vector<PerMaterialData> materials_gpu;
 
 void SetupBatchRendering(const okara::gltf::Loader &loader, const std::vector<LoadedTexture> &gpu_textures, const LoadedTexture &default_tex)
 {
     std::vector<Vertex> global_vertices;
     std::vector<uint32_t> global_indices;
 
+    // track offsets per primitive
+    struct PrimitiveOffsets
+    {
+        uint32_t count;
+        uint32_t first_index;
+        int32_t base_vertex;
+        uint32_t material_idx;
+    };
+
+    std::vector<std::vector<PrimitiveOffsets>> mesh_primitive_offsets(loader.meshes_.size());
+
     uint32_t current_first_index = 0;
     int32_t current_base_vertex = 0;
-    uint32_t draw_id = 0;
 
-    for (const okara::gltf::Mesh &mesh : loader.meshes_)
+    for (size_t m_idx = 0; m_idx < loader.meshes_.size(); ++m_idx)
     {
+        const auto &mesh = loader.meshes_[m_idx];
+        mesh_primitive_offsets[m_idx].reserve(mesh.primitives.size());
+
         for (const auto &p : mesh.primitives)
         {
             // pack vertices
@@ -243,36 +283,81 @@ void SetupBatchRendering(const okara::gltf::Loader &loader, const std::vector<Lo
             }
             // pack indices
             global_indices.insert(global_indices.end(), p.indices.begin(), p.indices.end());
-            // resolve material
-            GLuint64 tex_handle = default_tex.handle; // default handle
-            if (p.material < loader.materials_.size())
-            {
-                int tex_idx = loader.materials_[p.material].base_color_texture;
-                if (tex_idx >= 0 && tex_idx < gpu_textures.size())
-                {
-                    tex_handle = gpu_textures[tex_idx].handle;
-                }
-            }
-            materials_gpu.push_back({tex_handle});
 
-            // build indirect command
-            DrawElementsIndirectCommand cmd{};
-            cmd.count = static_cast<GLuint>(p.indices.size());
-            cmd.instanceCount = 1;
-            cmd.firstIndex = current_first_index;
-            cmd.baseVertex = current_base_vertex;
-            cmd.baseInstance = draw_id;
+            // save layout offsets
+            uint32_t index_count = static_cast<uint32_t>(p.indices.size());
+            uint32_t vertex_count = static_cast<uint32_t>(p.vertices.size());
+            uint32_t prim_mat = static_cast<uint32_t>(p.material);
 
-            indirect_commands.push_back(cmd);
+            mesh_primitive_offsets[m_idx].push_back({index_count, current_first_index, current_base_vertex, prim_mat});
 
-            // advance offsets
-            current_first_index += static_cast<uint32_t>(p.indices.size());
-            current_base_vertex += static_cast<int32_t>(p.vertices.size());
-            ++draw_id;
+            // move the pointer forward
+            current_first_index += index_count;
+            current_base_vertex += static_cast<int32_t>(vertex_count);
         }
     }
 
-    // create single global VAO, VBO, EBO
+    // build material gpu data
+    for (size_t i = 0; i < loader.materials_.size(); ++i)
+    {
+        GLuint64 tex_handle = default_tex.handle;
+        int tex_idx = loader.materials_[i].base_color_texture;
+        if (tex_idx >= 0 && tex_idx < static_cast<int>(gpu_textures.size()))
+        {
+            tex_handle = gpu_textures[tex_idx].handle;
+        }
+        materials_gpu.push_back({tex_handle});
+    }
+    // fall back material
+    if (materials_gpu.empty())
+    {
+        materials_gpu.push_back({default_tex.handle});
+    }
+
+    // build mesh instance ssbo and indirect draw commands
+    for (const auto &instance : loader.mesh_instances_)
+    {
+        if (instance.mesh < 0 || instance.mesh >= static_cast<int32_t>(loader.meshes_.size()))
+        {
+            continue;
+        }
+
+        // convert gltf matrix to column-major layout
+        glm::mat4 raw_world_matrix = glm::mat4(
+            instance.world_transform[0], instance.world_transform[1], instance.world_transform[2], instance.world_transform[3],
+            instance.world_transform[4], instance.world_transform[5], instance.world_transform[6], instance.world_transform[7],
+            instance.world_transform[8], instance.world_transform[9], instance.world_transform[10], instance.world_transform[11],
+            instance.world_transform[12], instance.world_transform[13], instance.world_transform[14], instance.world_transform[15]);
+
+        // apply transform only once before entering the primitive loop
+
+        glm::mat4 instance_world_matrix = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.0f, 0.0f)) * glm::scale(glm::mat4(1.0f), glm::vec3(10.0f)) * raw_world_matrix;
+
+        const auto &prim_offsets = mesh_primitive_offsets[instance.mesh];
+
+        for (const auto &offsets : prim_offsets)
+        {
+            uint32_t instance_id = static_cast<uint32_t>(instances_gpu.size());
+
+            // determine valid material index
+            int32_t mat_id = (offsets.material_idx < materials_gpu.size()) ? static_cast<int32_t>(offsets.material_idx) : 0;
+
+            // push instance data to SSBO vector
+            instances_gpu.push_back({instance_world_matrix, mat_id});
+
+            // build MDI command
+            DrawElementsIndirectCommand cmd{};
+            cmd.count = offsets.count;
+            cmd.instanceCount = 1;
+            cmd.firstIndex = offsets.first_index;
+            cmd.baseVertex = offsets.base_vertex;
+            cmd.baseInstance = instance_id; // maps to gl_BaseInstance in GLSL
+
+            indirect_commands.push_back(cmd);
+        }
+    }
+
+    // create buffers
     glCreateBuffers(1, &vbo);
     glNamedBufferStorage(vbo, global_vertices.size() * sizeof(Vertex), global_vertices.data(), 0);
 
@@ -291,18 +376,22 @@ void SetupBatchRendering(const okara::gltf::Loader &loader, const std::vector<Lo
     glVertexArrayVertexBuffer(vao, 0, vbo, 0, sizeof(Vertex));
     glVertexArrayElementBuffer(vao, ebo);
 
-    // create Indirect Command Buffer
+    // create indirect command buffer
     glCreateBuffers(1, &indirect_buffer);
     glNamedBufferStorage(indirect_buffer, indirect_commands.size() * sizeof(DrawElementsIndirectCommand), indirect_commands.data(), 0);
 
-    // create Material SSBO
+    // create material ssbo (binding = 1)
     glCreateBuffers(1, &material_ssbo);
-    glNamedBufferStorage(material_ssbo, materials_gpu.size() * sizeof(MaterialData), materials_gpu.data(), 0);
+    glNamedBufferStorage(material_ssbo, materials_gpu.size() * sizeof(PerMaterialData), materials_gpu.data(), 0);
+
+    // create instance ssbo (binding = 2)
+    glCreateBuffers(1, &instance_ssbo);
+    glNamedBufferStorage(instance_ssbo, instances_gpu.size() * sizeof(PerInstanceData), instances_gpu.data(), GL_DYNAMIC_STORAGE_BIT);
 }
 
 int main()
 {
-    Exercise();
+    // Exercise();
 
     WindowManager::Window window{};
     window.Create("Scene", 800, 600);
@@ -314,7 +403,8 @@ int main()
     LoadedTexture default_texture = CreateFallbackTexture();
 
     okara::gltf::Loader loader{};
-    loader.LoadScene("../../../resources/models/heather.glb");
+    loader.LoadScene("../../../resources/models/bot.glb");
+
 
     // load textures
     std::vector<LoadedTexture> gpu_textures;
@@ -384,14 +474,13 @@ int main()
         }
 
         float time = static_cast<float>(glfwGetTime());
-
         const auto windowSize = window.GetSize();
-        glm::mat4 model = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, -1.0f, 0.0f));
 
-        model = glm::rotate(model, time * glm::radians(50.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-        glm::mat4 view = glm::lookAt(glm::vec3(0.0f, 0.0f, 3.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+        glm::mat4 scene_rotation = glm::rotate(glm::mat4(1.0f), time * glm::radians(45.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+
+        glm::mat4 view = glm::lookAt(glm::vec3(0.0f, 0.0f, 50.0f), glm::vec3(0.0f, 5.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
         glm::mat4 proj = glm::perspective(glm::radians(45.0f), static_cast<float>(windowSize.width) / static_cast<float>(windowSize.height), 0.1f, 100.0f);
-        glm::mat4 mvp = proj * view * model;
+        glm::mat4 view_proj = proj * view * scene_rotation;
 
         glClearColor(0.1f, 0.12f, 0.1f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -399,11 +488,13 @@ int main()
         glUseProgram(shader_prog);
 
         // upload transform data
-        PerFrameData frame_data{mvp}; // when dealing with multiple objects best remove model from per frame matrix
+        PerFrameData frame_data{view_proj};
         glNamedBufferSubData(ubo, 0, sizeof(PerFrameData), &frame_data);
 
-        // bind ssbo
+        // bind ssbo (1: materials, 2: instances)
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, material_ssbo);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, instance_ssbo);
+
         glBindBuffer(GL_DRAW_INDIRECT_BUFFER, indirect_buffer);
         glBindVertexArray(vao);
 
