@@ -17,173 +17,25 @@ extern "C"
 #include <algorithm>
 #include <cmath>
 #include <common.hpp>
+#include <scene_graph.hpp>
 #include <window_manager.hpp>
 #include <file_manager.hpp>
 #include <shader_manager.hpp>
 
 #include "okara_gltf_importer.h"
 
-struct Transform
-{
-    glm::vec3 position{0.0f};
-    glm::quat rotation{1.0f, 0.0f, 0.0f, 0.0f};
-    glm::vec3 scale{1.0f};
-
-    glm::mat4 ToMatrix() const
-    {
-        glm::mat4 m = glm::translate(glm::mat4(1.0f), position);
-        m *= glm::mat4_cast(rotation);
-        m = glm::scale(m, scale);
-        return m;
-    }
-};
-
-struct Renderable
-{
-    std::uint32_t mesh_id{UINT32_MAX};
-    std::uint32_t material_id{UINT32_MAX};
-};
-
-struct DrawItem
-{
-    std::uint32_t mesh_id;
-    std::uint32_t material_id;
-    glm::mat4 world;
-};
-
-class Node
-{
-public:
-    explicit Node(std::string name = "Node") : name(std::move(name)) {}
-
-    // non-copyable, a node has a unique place in tree
-    Node(const Node &) = delete;
-    Node &operator=(const Node &) = delete;
-
-    // takes ownership
-    Node *AddChild(std::unique_ptr<Node> child)
-    {
-        child->parent_ = this;
-        child->MarkDirty();
-        children_.push_back(std::move(child));
-        return children_.back().get();
-    }
-
-    // gives ownership back to caller, detached sub-tree
-    std::unique_ptr<Node> RemoveChild(Node *child)
-    {
-        // clang-format off
-        auto itr = std::find_if(children_.begin(), children_.end(), [child](const std::unique_ptr<Node> &c){ return c.get() == child; });
-        // clang-format on
-
-        if (itr == children_.end())
-        {
-            return nullptr;
-        }
-
-        std::unique_ptr<Node> detached = std::move(*itr);
-        children_.erase(itr);
-        detached->parent_ = nullptr;
-        detached->MarkDirty();
-        return detached;
-    }
-
-    Node *Parent() const { return parent_; }
-    const std::vector<std::unique_ptr<Node>> &Children() const { return children_; }
-
-    // local transform, modify only through setters
-    const Transform &GetTransform() const { return transform_; }
-
-    void SetPosition(const glm::vec3 &p)
-    {
-        transform_.position = p;
-        MarkDirty();
-    }
-
-    void SetRotation(const glm::quat &r)
-    {
-        transform_.rotation = r;
-        MarkDirty();
-    }
-
-    void SetScale(const glm::vec3 &s)
-    {
-        transform_.scale = s;
-        MarkDirty();
-    }
-
-    // world space
-    const glm::mat4 WorldMatrix() const
-    {
-        if (dirty_)
-        {
-            const glm::mat4 local = transform_.ToMatrix();
-            world_ = parent_ ? parent_->WorldMatrix() * local : local;
-            dirty_ = false;
-        }
-        return world_;
-    }
-
-    glm::vec3 WorldPosition() const { return glm::vec3(WorldMatrix()[3]); }
-
-    Renderable GetRenderable() const { return renderable_; }
-
-    std::string name;
-
-private:
-    void MarkDirty()
-    {
-        if (dirty_)
-        {
-            return;
-        }
-        dirty_ = true;
-        for (auto &child : children_)
-        {
-            child->MarkDirty();
-        }
-    }
-
-    Transform transform_; // local, relative to parent
-    mutable glm::mat4 world_{1.0f};
-    mutable bool dirty_{true};
-
-    Node *parent_ = nullptr;
-    std::vector<std::unique_ptr<Node>> children_;
-
-    Renderable renderable_;
-};
-
-static inline void CollectDrawItems(const Node &node, std::vector<DrawItem> &out_items)
-{
-    const auto &renderable = node.GetRenderable();
-    out_items.push_back({renderable.mesh_id, renderable.material_id, node.WorldMatrix()});
-
-    for (const auto &child : node.Children())
-    {
-        CollectDrawItems(*child, out_items);
-    }
-}
-
-void PrintTree(const Node &node, int depth = 0)
-{
-    std::print("{}{}\n", std::string(depth * 2, ' '), node.name);
-
-    for (const auto &child : node.Children())
-    {
-        PrintTree(*child, depth + 1);
-    }
-}
-
 void Exercise()
 {
+    // root
     std::unique_ptr<Node> root = std::make_unique<Node>("root");
 
-    // build tree root -> car -> (wheel_left, wheel_right) and root -> tree
-    auto *car = root->AddChild(std::make_unique<Node>("car"));
-    auto *wheel_left = car->AddChild(std::make_unique<Node>("wheel_left"));
-    car->AddChild(std::make_unique<Node>("wheel_right"));
-    auto *tree = root->AddChild(std::make_unique<Node>("tree"));
+    // car
+    auto car = root->AddChild(std::make_unique<Node>("car"));
+    auto wheel_fl = car->AddChild(std::make_unique<Node>("wheel_fl"));
+    auto wheel_fr = car->AddChild(std::make_unique<Node>("wheel_fr"));
+
+    // tree
+    auto tree = root->AddChild(std::make_unique<Node>("tree"));
 
     exit(EXIT_SUCCESS);
 }
@@ -391,7 +243,7 @@ void SetupBatchRendering(const okara::gltf::Loader &loader, const std::vector<Lo
 
 int main()
 {
-    // Exercise();
+    Exercise();
 
     WindowManager::Window window{};
     window.Create("Scene", 800, 600);
@@ -404,7 +256,6 @@ int main()
 
     okara::gltf::Loader loader{};
     loader.LoadScene("../../../resources/models/bot.glb");
-
 
     // load textures
     std::vector<LoadedTexture> gpu_textures;
@@ -491,7 +342,7 @@ int main()
         PerFrameData frame_data{view_proj};
         glNamedBufferSubData(ubo, 0, sizeof(PerFrameData), &frame_data);
 
-        // bind ssbo (1: materials, 2: instances)
+        // bind SSBOs
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, material_ssbo);
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, instance_ssbo);
 
