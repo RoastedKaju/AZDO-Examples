@@ -6,13 +6,13 @@
 
 namespace WindowManager
 {
-	static inline void DefaultFrameBufferSizeCallback(GLFWwindow* inWindow, int inWidth, int inHeight);
-	static inline void GLAPIENTRY DebugOutput(GLenum inSource, GLenum inType, GLuint inID, GLenum inSeverity, GLsizei inLength, const GLchar* inMessage, const void* inUserParam);
+	static inline void DefaultFrameBufferSizeCallback(GLFWwindow *inWindow, int inWidth, int inHeight);
+	static inline void GLAPIENTRY DebugOutput(GLenum inSource, GLenum inType, GLuint inID, GLenum inSeverity, GLsizei inLength, const GLchar *inMessage, const void *inUserParam);
 
 	class Window
 	{
 	public:
-		bool Create(const char* inTitle, int inWidth, int inHeight)
+		bool Create(const char *inTitle, int inWidth, int inHeight)
 		{
 			mWidth = inWidth;
 			mHeight = inHeight;
@@ -37,6 +37,7 @@ namespace WindowManager
 			}
 			// Make current window as context
 			glfwMakeContextCurrent(pWindow);
+			glfwSwapInterval(1);
 			SetFramebufferSizeCallback(DefaultFrameBufferSizeCallback);
 
 			// Initialize GLAD
@@ -113,34 +114,39 @@ namespace WindowManager
 		}
 
 		// Getters
-		GLFWwindow* GetHandle() const { return pWindow; }
-		Extent2D GetSize() const { return { mWidth, mHeight }; }
+		GLFWwindow *GetHandle() const { return pWindow; }
+		Extent2D GetSize() const { return {mWidth, mHeight}; }
 
 		// Setters
-		void SetSize(const int inWidth, const int inHeight) { mWidth = inWidth; mHeight = inHeight; }
+		void SetSize(const int inWidth, const int inHeight)
+		{
+			mWidth = inWidth;
+			mHeight = inHeight;
+		}
 		void SetResized(const bool inResized) { mResized = inResized; }
 
 	private:
-		int mWidth{ 800 };
-		int mHeight{ 600 };
-		bool mResized{ false };
+		int mWidth{800};
+		int mHeight{600};
+		bool mResized{false};
 
-		GLFWwindow* pWindow{ nullptr };
+		GLFWwindow *pWindow{nullptr};
 	};
 
-	static inline void DefaultFrameBufferSizeCallback(GLFWwindow* inWindow, int inWidth, int inHeight)
+	static inline void DefaultFrameBufferSizeCallback(GLFWwindow *inWindow, int inWidth, int inHeight)
 	{
-		if (Window* owningWindow = static_cast<Window*>(glfwGetWindowUserPointer(inWindow)))
+		if (Window *owningWindow = static_cast<Window *>(glfwGetWindowUserPointer(inWindow)))
 		{
 			owningWindow->SetSize(inWidth, inHeight);
 			owningWindow->SetResized(true);
 		}
 	}
 
-	static inline void GLAPIENTRY DebugOutput(GLenum inSource, GLenum inType, GLuint inID, GLenum inSeverity, GLsizei inLength, const GLchar* inMessage, const void* inUserParam)
+	static inline void GLAPIENTRY DebugOutput(GLenum inSource, GLenum inType, GLuint inID, GLenum inSeverity, GLsizei inLength, const GLchar *inMessage, const void *inUserParam)
 	{
 		// Ignore non-significant error codes
-		if (inID == 131169 || inID == 131185 || inID == 131218 || inID == 131204) return;
+		if (inID == 131169 || inID == 131185 || inID == 131218 || inID == 131204)
+			return;
 		std::cerr << "GL Debug [" << inID << "] " << inMessage << '\n';
 	}
 }
