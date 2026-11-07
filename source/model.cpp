@@ -746,7 +746,7 @@ int main()
 	glBindBufferBase(GL_UNIFORM_BUFFER, 0, perFrameUBO);
 
 	// Load Ibex model
-	Model ibex = LoadModel("../../../resources/models/ibex.glb", defaultTextures);
+	Model ibex = LoadModel("../../../resources/models/heather.glb", defaultTextures);
 
 	// Allocate space for SSBO for every primitive
 	GLuint materialSSBO;
@@ -789,7 +789,7 @@ int main()
 
 		// MVP
 		glm::mat4 model = glm::rotate(glm::mat4(1.0f), time * glm::radians(50.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-		glm::mat4 view = glm::lookAt(glm::vec3(0.0f, 1.0f, 3.0f), glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+		glm::mat4 view = glm::lookAt(glm::vec3(0.0f, 1.0f, 3.0f), glm::vec3(0.0f, 1.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
 		glm::mat4 projection = glm::perspective(glm::radians(60.0f), (float)sWidth / (float)sHeight, 0.1f, 100.0f);
 
 		// Clear color

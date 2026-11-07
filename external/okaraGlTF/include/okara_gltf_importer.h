@@ -13,6 +13,7 @@
 // TODO: add GlTF support
 // TODO: read values as double to support larger scenes
 // TODO: make copy binary data into a function
+// TODO: fill the remaining animation sampler fields, timestamps and keyframe data
 
 namespace okara::gltf
 {
@@ -267,12 +268,36 @@ namespace okara::gltf
         std::vector<Matrix4x4> inverse_bind_matrices;
     };
 
+    struct AnimationSampler
+    {
+        std::int32_t input_accessor{-1};
+        std::int32_t output_accessor{-1};
+        std::string interpolation{"LINEAR"}; // "LINEAR", "STEP", or "CUBICSPLINE"
+        std::vector<float> timestamps;
+        std::vector<float> keyframe_data;
+    };
+
+    struct AnimationChannel
+    {
+        std::int32_t sampler{-1};
+        std::int32_t target_node{-1};
+        std::string target_path{"translation"};
+    };
+
+    struct Animation
+    {
+        std::string name{};
+        std::vector<AnimationSampler> samplers;
+        std::vector<AnimationChannel> channels;
+        float duration{0.0f}; // maximum time value from all input accessors
+    };
+
     class Loader
     {
     public:
         bool LoadScene(const std::string &path)
         {
-            
+
             std::ifstream file(path, std::ios::binary);
             if (!file.is_open())
             {
@@ -431,7 +456,6 @@ namespace okara::gltf
             {
                 return false;
             }
-
             // materials
             if (!ParseMaterials(root.get()))
             {
@@ -449,6 +473,11 @@ namespace okara::gltf
             }
             // images
             if (!ParseImages(root.get()))
+            {
+                return false;
+            }
+            // animations
+            if (!ParseAnimations(root.get()))
             {
                 return false;
             }
@@ -514,6 +543,15 @@ namespace okara::gltf
                 TraverseNode(node, IDENTITY_MATRIX);
             }
 
+            // copy animation data from binary chunk
+            for (Animation &anim : animations_)
+            {
+                for (AnimationSampler &sampler : anim.samplers)
+                {
+                    CopyAnimationSamplerData(sampler);
+                }
+            }
+
             // NOTE: print mesh data
             for (const MeshInstance &instance : mesh_instances_)
             {
@@ -533,6 +571,20 @@ namespace okara::gltf
                 }
             }
 
+            // NOTE: print animation data
+            std::print("Total animations: {}\n", animations_.size());
+            for (std::size_t i = 0; i < animations_.size(); ++i)
+            {
+                const auto &anim = animations_[i];
+                std::print("Animation [{}]: Name = {}, Samplers = {}\n", i, anim.name, anim.channels.size(), anim.samplers.size());
+
+                for (std::size_t c = 0; c < anim.channels.size(); ++c)
+                {
+                    const auto &chan = anim.channels[c];
+                    std::print("\tChannel [{}]: Target Node = {}, Path = {}, Sampler Index = {}\n", c, chan.target_node, chan.target_path, chan.sampler);
+                }
+            }
+
             // release the temperory data
             binary_data_.clear();
             binary_data_.shrink_to_fit();
@@ -540,7 +592,7 @@ namespace okara::gltf
             return true;
         }
 
-    private:
+    public:
         /// @brief Iterates over buffers array, each buffer is region.
         /// @param root JSON object.
         /// @return True if successful.
@@ -1198,6 +1250,93 @@ namespace okara::gltf
             return true;
         }
 
+        bool ParseAnimations(cJSON *root)
+        {
+            cJSON *animations_json = cJSON_GetObjectItemCaseSensitive(root, "animations");
+            if (!cJSON_IsArray(animations_json))
+            {
+                return true;
+            }
+
+            animations_.clear();
+            animations_.reserve(cJSON_GetArraySize(animations_json));
+
+            cJSON *animation_json = nullptr;
+            cJSON_ArrayForEach(animation_json, animations_json)
+            {
+                Animation result{};
+                cJSON *name = cJSON_GetObjectItemCaseSensitive(animation_json, "name");
+                if (cJSON_IsString(name))
+                {
+                    result.name = name->valuestring;
+                }
+
+                // parse samplers
+                cJSON *samplers_json = cJSON_GetObjectItemCaseSensitive(animation_json, "samplers");
+                if (cJSON_IsArray(samplers_json))
+                {
+                    cJSON *sampler_json = nullptr;
+                    cJSON_ArrayForEach(sampler_json, samplers_json)
+                    {
+                        AnimationSampler sampler{};
+                        cJSON *input = cJSON_GetObjectItemCaseSensitive(sampler_json, "input");
+                        cJSON *output = cJSON_GetObjectItemCaseSensitive(sampler_json, "output");
+                        cJSON *interpolation = cJSON_GetObjectItemCaseSensitive(sampler_json, "interpolation");
+
+                        if (cJSON_IsNumber(input))
+                        {
+                            sampler.input_accessor = input->valueint;
+                        }
+                        if (cJSON_IsNumber(output))
+                        {
+                            sampler.output_accessor = output->valueint;
+                        }
+                        if (cJSON_IsString(interpolation))
+                        {
+                            sampler.interpolation = interpolation->valuestring;
+                        }
+                        result.samplers.push_back(sampler);
+                    }
+                }
+
+                // parse channels
+                cJSON *channels_json = cJSON_GetObjectItemCaseSensitive(animation_json, "channels");
+                if (cJSON_IsArray(channels_json))
+                {
+                    cJSON *channel_json = nullptr;
+                    cJSON_ArrayForEach(channel_json, channels_json)
+                    {
+                        AnimationChannel channel{};
+                        cJSON *sampler_idx = cJSON_GetObjectItemCaseSensitive(channel_json, "sampler");
+                        cJSON *target = cJSON_GetObjectItemCaseSensitive(channel_json, "target");
+
+                        if (cJSON_IsNumber(sampler_idx))
+                        {
+                            channel.sampler = sampler_idx->valueint;
+                        }
+                        if (cJSON_IsObject(target))
+                        {
+                            cJSON *node = cJSON_GetObjectItemCaseSensitive(target, "node");
+                            cJSON *path = cJSON_GetObjectItemCaseSensitive(target, "path");
+
+                            if (cJSON_IsNumber(node))
+                            {
+                                channel.target_node = node->valueint;
+                            }
+                            if (cJSON_IsString(path))
+                            {
+                                channel.target_path = path->valuestring;
+                            }
+                        }
+                        result.channels.push_back(channel);
+                    }
+                }
+
+                animations_.push_back(std::move(result));
+            }
+            return true;
+        }
+
         void CopyVerticesFromBin(Primitive &primitive)
         {
             if (primitive.position_accessor < 0)
@@ -1259,7 +1398,7 @@ namespace okara::gltf
                 for (std::size_t i = 0; i < vertex_count; ++i)
                 {
                     const std::byte *elem_ptr = src_bytes + (i * stride);
-                    auto *dst_ptr = get_target_ptr(primitive.vertices[i]); // uint16_t[4] or uint32_t[4]
+                    auto *dst_ptr = get_target_ptr(primitive.vertices[i]);
 
                     for (size_t c = 0; c < 4; ++c)
                     {
@@ -1371,6 +1510,45 @@ namespace okara::gltf
             if (primitive.mode == PrimitiveRenderMode::kTriangles)
             {
                 assert(primitive.indices.size() % 3 == 0);
+            }
+        }
+
+        void CopyAnimationSamplerData(AnimationSampler &sampler)
+        {
+            // read timestamps
+            if (sampler.input_accessor >= 0)
+            {
+                const Accessor &acc = accessors_[sampler.input_accessor];
+                const BufferView &view = buffer_views_[acc.buffer_view];
+                const float *src = reinterpret_cast<const float *>(binary_data_.data() + view.byte_offset + acc.byte_offset);
+
+                sampler.timestamps.assign(src, src + acc.count);
+            }
+
+            // read keyframe VEC3 for translation and scale, VEC4 for rotation
+            if (sampler.output_accessor >= 0)
+            {
+                const Accessor &acc = accessors_[sampler.output_accessor];
+                const BufferView &view = buffer_views_[acc.buffer_view];
+
+                std::size_t num_comps = 1;
+                if (acc.type == "VEC3")
+                {
+                    num_comps = 3;
+                }
+                else if (acc.type == "VEC4")
+                {
+                    num_comps = 4;
+                }
+
+                if (sampler.interpolation == "CUBICSPLINE")
+                {
+                    num_comps *= 3;
+                }
+
+                const float *src = reinterpret_cast<const float *>(binary_data_.data() + view.byte_offset + acc.byte_offset);
+
+                sampler.keyframe_data.assign(src, src + (acc.count * num_comps));
             }
         }
 
@@ -1537,7 +1715,7 @@ namespace okara::gltf
             return 4;
         }
 
-        std::int32_t ReadComponentAsUint(const std::byte *src, ComponentType type)
+        std::uint32_t ReadComponentAsUint(const std::byte *src, ComponentType type)
         {
             switch (type)
             {
@@ -1603,11 +1781,12 @@ namespace okara::gltf
         std::vector<BufferView> buffer_views_;
         std::vector<Accessor> accessors_;
 
+        std::vector<Scene> scenes_;
+        std::vector<Node> nodes_;
         std::vector<Mesh> meshes_;
         std::vector<MeshInstance> mesh_instances_;
-        std::vector<Node> nodes_;
         std::vector<Skin> skins_;
-        std::vector<Scene> scenes_;
+        std::vector<Animation> animations_;
         int default_scene_{-1};
 
         std::vector<Material> materials_;
